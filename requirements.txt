@@ -1,0 +1,17 @@
+# LLM
+openai>=1.30.0
+
+# Certificados SSL — necesario en redes con proxy SSL (Zscaler, etc.)
+truststore>=0.9.0
+
+# MCP Python SDK (cliente para conectarse al servidor MCP de Garmin)
+mcp>=1.0.0
+
+# Variables de entorno
+python-dotenv>=1.0.0
+
+# Interfaz CLI enriquecida
+rich>=13.7.0
+
+# Fechas y utilidades
+python-dateutil>=2.9.0
