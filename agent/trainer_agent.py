@@ -9,7 +9,7 @@ import ssl
 import json
 import asyncio
 import hashlib
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -117,7 +117,6 @@ def update_gemini_daily_usage(api_key: str, tokens: int) -> int:
     
     # Limpiar entradas de más de 30 días para que el archivo no crezca indefinidamente
     try:
-        from datetime import datetime, timedelta
         cutoff = (datetime.now() - timedelta(days=30)).date().isoformat()
         for kh in list(data.keys()):
             if isinstance(data[kh], dict):
@@ -598,7 +597,7 @@ class _GeminiCompletions:
                     await asyncio.sleep(current_delay)
                     delay *= 2
                 else:
-                    raise e
+                    raise
 
         return self._parse(response)
 
@@ -785,7 +784,7 @@ class TrainerAgent:
     def _build_messages(self, user_message: str) -> list[dict]:
         """Construye el array de mensajes para la llamada al LLM.
         Limita el historial a los últimos 6 turnos (3 pares user/assistant)
-        para no superar el límite de tokens de GitHub Models (8000).
+        para mantener el contexto razonable sin consumir tokens innecesarios.
         """
         messages = [{"role": "system", "content": self._build_system_prompt()}]
         # Solo los últimos 6 mensajes del historial (3 intercambios)
