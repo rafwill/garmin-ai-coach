@@ -1,86 +1,109 @@
 # 🏃‍♂️ Garmin AI Coach
 
-**Garmin AI Coach** es un asistente y entrenador deportivo personal inteligente. Funciona combinando el poder de los modelos de lenguaje (LLM) con tus datos deportivos reales de Garmin, utilizando un **servidor de Protocolo de Contexto de Modelo (MCP)** de alto rendimiento.
+**Garmin AI Coach** es un asistente y entrenador deportivo personal inteligente. Combina modelos de lenguaje (LLM) con tus datos deportivos reales de Garmin a través del **servidor MCP [`garmin_mcp`](https://github.com/Taxuspt/garmin_mcp)** (110+ herramientas), que se gestiona automáticamente vía `uvx` sin necesidad de instalación manual.
 
-El agente analiza tus métricas de rendimiento (como VO2Max, HRV, peso, sueño), tus récords personales históricos, tus actividades recientes e interactúa de manera inteligente para darte recomendaciones personalizadas, planes de carrera, análisis de ritmos y más, **100% centrado en tus datos reales de Garmin Connect**.
+El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbral de lactato, puntuación de resistencia...), tus récords personales históricos y tus actividades recientes para darte recomendaciones personalizadas, planes de entrenamiento y análisis de ritmos **100% basados en tus datos reales de Garmin Connect**.
 
 ---
 
 ## ✨ Características clave
 
-* **🧠 Multi-Proveedor de Inteligencia Artificial:**
-  - **Google Gemini (Recomendado):** Totalmente integrado mediante el SDK de Google GenAI (`gemini-2.5-flash`), con soporte para control de cuotas y estimación diaria persistente en local (límite de 1,000,000 de tokens diarios gratis).
-  - **Mistral Local (Ollama / LM Studio):** 100% privado, ilimitado, ejecutándose directo en tu máquina a través de un endpoint compatible con API de OpenAI.
-  - **Groq:** Conectividad veloz ejecutando `llama-3.3-70b` (100k tokens gratuitos por día).
-  - **GitHub Models:** Acceso optimizado para VPNs corporativas a través de `gpt-4o-mini` y `gpt-4o`.
-* **⌚ Integración con Garmin Connect MCP:**
-  - Consulta automática de récords (desde 1km hasta natación o carreras de larga distancia).
-  - Acceso seguro a estadísticas de salud recientes (HRV / Variabilidad de frecuencia cardíaca, VO2Max, etc.).
-  - Pruning recursivo de objetos raw del API para proteger y limpiar los datos que se envían al modelo (reducción masiva de tokens).
-* **💾 Memoria Persistente de Sesión y Tokens:**
-  - Almacena el perfil deportivo dinámico del usuario de manera segura en [memory/user_profile.json](memory/user_profile.json).
-  - Memoriza de forma local las llamadas y los tokens utilizados por cada una de tus API Keys vía hash SHA-256 en [memory/gemini_daily_usage.json](memory/gemini_daily_usage.json).
-* **🐳 Robustez en Windows y VPNs:**
-  - Resuelve de manera nativa problemas de variables de entorno de Node.js mediante búsquedas directas en el Registro de Windows.
-  - Soporte para Certificados SSL corporativos (como Zscaler) autodetectando configuraciones locales de red.
+* **🧠 Tres proveedores de IA en la nube:**
+  | Opción | Modelo | Límite gratuito | Requiere |
+  |--------|--------|-----------------|----------|
+  | **Google Gemini** *(recomendado)* | `gemini-2.5-flash` | ~1M tokens/día | API key gratuita |
+  | **Groq** | `llama-3.3-70b-versatile` | 100k tokens/día | API key gratuita |
+  | **GitHub Models** | `gpt-4o-mini` | — | GitHub token + VPN |
+
+* **⌚ 110+ herramientas de Garmin Connect:**
+  - Actividades, zonas FC, splits, progreso, récords personales
+  - Salud diaria: frecuencia cardíaca, body battery, estrés, pasos, respiración, SPO2
+  - Métricas avanzadas: HRV, VO2Max, predicciones de carrera, umbral de lactato, puntuación de resistencia, edad de fitness
+  - Sueño, composición corporal, hidratación, perfil de usuario y objetivos
+
+* **🔐 Autenticación OAuth con Garmin:**
+  - Los tokens OAuth se guardan una sola vez en `~/.garminconnect` (válidos ~6 meses).
+  - No se almacenan contraseñas en texto plano en ningún proceso del agente.
+
+* **💾 Memoria de perfil de usuario:**
+  - Historial de sesiones resumido en `memory/user_profile.json`.
+  - Control local de cuota de Gemini en `memory/gemini_daily_usage.json` (hash SHA-256 de la API key, nunca en claro).
+
+* **🔧 Sin dependencias de Node.js:**
+  - El servidor MCP es 100% Python, lanzado automáticamente por `uvx` en un entorno aislado.
 
 ---
 
 ## 🛠️ Requisitos previos
 
-1. **Python:** Versión `3.10` en adelante (desarrollado y probado sobre Python `3.14`).
-2. **Node.js:** Versión `18.0` o superior (necesario para ejecutar el servidor MCP de Garmin bajo stdio).
-3. **Credenciales de Garmin Connect:** Una cuenta activa en Garmin Connect.
+| Requisito | Versión mínima | Notas |
+|-----------|---------------|-------|
+| **Python** | 3.10+ | Desarrollado con 3.14 |
+| **uv / uvx** | cualquiera | Gestiona el servidor MCP automáticamente |
+| **Cuenta Garmin Connect** | — | Credenciales de acceso |
+| **API key** de Gemini o Groq | — | Gratuitas (ver `.env.example`) |
+
+### Instalar uv (si aún no lo tienes)
+```powershell
+pip install uv
+```
 
 ---
 
 ## 🚀 Instalación y Configuración
 
-Sigue estos sencillos pasos para dejar el agente en funcionamiento en tu equipo:
-
-### 1. Clonar el repositorio y configurar el entorno Python
-Asegúrate de preparar tu entorno de ejecución:
+### 1. Clonar y preparar el entorno Python
 ```powershell
-# Crear y activar tu entorno virtual (Windows)
+git clone https://github.com/rafwill/garmin-ai-coach.git
+cd garmin-ai-coach
+
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 
-# Instalar las dependencias del proyecto
 pip install -r requirements.txt
 ```
 
 ### 2. Configurar variables de entorno
-Crea una copia de nuestro archivo de ejemplo `.env.example` y renómbralo a `.env`:
 ```powershell
 cp .env.example .env
 ```
-Abre tu archivo `.env` y configura al menos:
-* Tus credenciales de Garmin (`GARMIN_EMAIL` y `GARMIN_PASSWORD`).
-* La API Key del proveedor que vayas a utilizar habitualmente.
+Edita `.env` y rellena al menos:
+- `GARMIN_EMAIL` y `GARMIN_PASSWORD`
+- La API key del proveedor que uses (`GEMINI_API_KEY`, `GROQ_API_KEY` o `GITHUB_TOKEN`)
 
-*(Puedes encontrar instrucciones de registro y URLs de endpoints locales en los comentarios detallados del propio archivo `.env`).*
+*(Consulta los comentarios en `.env.example` para obtener las URLs de registro de cada proveedor.)*
+
+### 3. Pre-autenticar con Garmin Connect *(una sola vez)*
+Este paso guarda los tokens OAuth en `~/.garminconnect` para que el agente no necesite tu contraseña en cada arranque:
+```powershell
+$env:GARMIN_EMAIL="tu@email.com"
+$env:GARMIN_PASSWORD="tu_contraseña"
+uvx --python 3.12 --from git+https://github.com/Taxuspt/garmin_mcp garmin-mcp-auth
+```
+> Los tokens son válidos aproximadamente **6 meses**. Repite este paso cuando expiren.
 
 ---
 
-## 🏃‍♂️ Cómo se utiliza
+## 🏃‍♂️ Uso
 
-1. **Asegúrate de levantar el modelo (si deseas usar Local Mistral):**
-   Si usas **Ollama**, asegúrate de tener el demonio activo ejecutando:
-   ```bash
-   ollama run mistral
-   ```
-2. **Lanzar la interfaz interactiva:**
-   Inicia la ejecución en tu consola interactiva:
-   ```powershell
-   python -m agent.main
-   ```
-3. **Selecciona tu IA favorita:**
-   El terminal interactivo te ofrecerá un menú estético para escoger tu IA de la sesión.
-4. **¡Empieza a chatear!**
-   Pregúntale cosas de este estilo:
-   - *"¿Cuál ha sido mi mejor ritmo en media maratón y qué me recomiendas para bajar de 1h45?"*
-   - *"Analízame como deportista usando mis métricas de la última semana"*
-   - *"¿He corrido hoy? Hazme un resumen de mi última actividad"*
+```powershell
+python -m agent.main
+```
+
+El agente descargará automáticamente el servidor MCP en el primer arranque (vía `uvx`). Después aparecerá el menú de proveedores:
+
+```
+  1 · GitHub Models (gpt-4o-mini)      — dentro de VPN
+  2 · Groq         (llama-3.3-70b)     — sin VPN · 100k tokens/día
+  3 · Google Gemini (gemini-2.5-flash) — sin VPN · ~1M tokens/día GRATIS
+```
+
+### Ejemplos de preguntas
+- *"¿Cuál ha sido mi mejor ritmo en media maratón y qué necesito para bajar de 1h45?"*
+- *"Analízame como deportista usando mis métricas de la última semana"*
+- *"¿Cuál es mi VO2Max actual y cómo ha evolucionado?"*
+- *"Dame un plan de entrenamiento para la próxima carrera de 10K"*
+- *"¿Cómo ha sido mi sueño y HRV esta semana?"*
 
 ---
 
@@ -90,32 +113,32 @@ Abre tu archivo `.env` y configura al menos:
 garmin-ai-coach/
 ├── agent/
 │   ├── __init__.py
-│   ├── main.py            # Punto de entrada principal y terminal interactivo.
-│   ├── mcp_client.py      # Conector cliente asíncrono para el Garmin Connect MCP.
-│   └── trainer_agent.py   # Sistema del agente, adaptadores de OpenAI/Gemini/Local y formateo de Garmin.
+│   ├── main.py            # Punto de entrada: menú de proveedor e interfaz de chat.
+│   ├── mcp_client.py      # Cliente MCP asíncrono — lanza garmin_mcp vía uvx.
+│   └── trainer_agent.py   # Agente: lógica de tool-calling, adaptadores LLM, memoria.
 ├── memory/
-│   ├── user_profile.json  # Historial resumido de tus sesiones y perfil de deportista.
-│   └── gemini_daily_usage.json # Recuento de tokens local y de seguridad por API Key.
+│   ├── user_profile.json       # Historial de sesiones y perfil dinámico del deportista.
+│   └── gemini_daily_usage.json # Control de cuota diaria de Gemini (API key hasheada).
 ├── prompts/
-│   └── system_prompt.md   # Instrucciones que moldean la personalidad de tu entrenador GarminCoach.
-├── .env                   # Variables locales y credenciales (mantener privado).
-├── requirements.txt       # Requisitos de librerías de Python.
-└── README.md              # Documentación general del coach.
+│   └── system_prompt.md   # Personalidad e instrucciones del entrenador GarminCoach.
+├── .env                   # Credenciales locales (no subir a git).
+├── .env.example           # Plantilla de configuración con comentarios.
+├── requirements.txt       # Dependencias Python.
+└── README.md
 ```
 
 ---
 
 ## 🔒 Privacidad y Seguridad
 
-Tu información física y deportiva es extremadamente valiosa. Por ello:
-* **Ejecución Local:** Si escoges la opción `Mistral Local (Ollama)`, absolutamente ningún dato deportivo, peso o altura sale de tu propio equipo.
-* **Hasehado de claves:** En el seguimiento de cuota de Gemini, las claves de tus APIs nunca se escriben en texto plano en la máquina; el identificador se almacena como un hash unidireccional SHA-256.
-* **Pruning Inteligente:** Los metadatos de sincronización inservibles del Garmin API se limpian y desechan antes de alimentar al procesador para evitar sobrecostes e intrusiones de datos ajenos.
+- **OAuth seguro:** Garmin autentica vía tokens; la contraseña solo se usa en la pre-autenticación inicial y nunca se guarda en disco por el agente.
+- **API keys hasheadas:** El identificador local de cuota de Gemini usa SHA-256 — la clave nunca se escribe en texto plano.
+- **Pruning inteligente:** Los metadatos innecesarios de la API de Garmin se eliminan antes de enviarlos al LLM, reduciendo tokens y evitando fugas de datos irrelevantes.
 
 ---
 
-## 📝 Contribuciones y Desarrollo
+## 📝 Contribuciones
 
-¡Las contribuciones, issues y feedback deportivo son super bienvenidos! Si encuentras alguna fórmula matemática de ritmos mal calculada o si quieres añadir conectores para otros modelos, no dudes en abrir un *Pull Request* o reportar una incidencia.
+¡Las contribuciones, issues y sugerencias son bienvenidas! Si encuentras algún cálculo de ritmos incorrecto o quieres añadir nuevas herramientas, abre un *Pull Request* o una incidencia.
 
 ¡Buen entrenamiento! 🏁
