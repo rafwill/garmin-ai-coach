@@ -67,8 +67,6 @@ def get_gemini_daily_usage(api_key: str) -> int:
         key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
         day_data = data.get(key_hash, {}).get(today_str, 0)
         if isinstance(day_data, dict):
-            if day_data.get("quota_exhausted", False):
-                return 1000000
             return day_data.get("tokens", 0)
         return day_data
     except Exception:
@@ -161,8 +159,7 @@ def mark_gemini_quota_exhausted(api_key: str) -> None:
         current_tokens = day_data
         
     data[key_hash][today_str] = {
-        "tokens": max(current_tokens, 1000000),
-        "quota_exhausted": True
+            "tokens": current_tokens,
     }
     
     try:
@@ -372,9 +369,7 @@ ESSENTIAL_TOOLS = {
 
 
 def _build_tools_schema(tools: list[dict]) -> list[dict]:
-    """Convierte las herramientas MCP al formato de function calling de OpenAI/GitHub Models.
-    Solo incluye las herramientas esenciales para el agente entrenador.
-    """
+    """Convierte las herramientas MCP al formato de function calling de OpenAI/GitHub Models."""
     return [
         {
             "type": "function",
@@ -385,7 +380,6 @@ def _build_tools_schema(tools: list[dict]) -> list[dict]:
             },
         }
         for tool in tools
-        if tool["name"] in ESSENTIAL_TOOLS
     ]
 
 

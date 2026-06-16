@@ -32,7 +32,7 @@ console = Console()
 _PROVIDER_INFO = {
     "vpn":    ("GITHUB_TOKEN",  "GitHub Models (gpt-4o-mini)",          "VPN activa"),
     "groq":   ("GROQ_API_KEY",  "Groq (llama-3.3-70b-versatile)",       "100k tokens/día"),
-    "gemini": ("GEMINI_API_KEY", "Google Gemini (gemini-2.5-flash)",     "~1M tokens/día · recomendado"),
+    "gemini": ("GEMINI_API_KEY", "Google Gemini (gemini-2.0-flash)",     "~1M tokens/día · recomendado"),
 }
 
 
