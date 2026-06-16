@@ -30,9 +30,11 @@ console = Console()
 
 
 _PROVIDER_INFO = {
-    "vpn":    ("GITHUB_TOKEN",  "GitHub Models (gpt-4o-mini)",          "VPN activa"),
-    "groq":   ("GROQ_API_KEY",  "Groq (llama-3.3-70b-versatile)",       "100k tokens/día"),
-    "gemini": ("GEMINI_API_KEY", "Google Gemini (gemini-2.0-flash)",     "~1M tokens/día · recomendado"),
+    "vpn":      ("GITHUB_TOKEN",     "GitHub Models (gpt-4o-mini)",         "VPN activa"),
+    "groq":     ("GROQ_API_KEY",     "Groq (llama-3.3-70b-versatile)",      "100k tokens/día"),
+    "gemini":   ("GEMINI_API_KEY",   "Google Gemini (gemini-2.0-flash)",    "~1M tokens/día gratis"),
+    "mistral":  ("MISTRAL_API_KEY",  "Mistral (mistral-small-latest)",      "capa gratuita · console.mistral.ai"),
+    "cerebras": ("CEREBRAS_API_KEY", "Cerebras (llama-3.3-70b)",            "ultrarrápido · gratis · cloud.cerebras.ai"),
 }
 
 
@@ -52,9 +54,11 @@ def _check_env(provider: str) -> None:
         
     if missing:
         hints = {
-            "GROQ_API_KEY":  "https://console.groq.com",
-            "GEMINI_API_KEY": "https://aistudio.google.com  → Get API key",
-            "GITHUB_TOKEN":  "https://github.com/settings/tokens",
+            "GROQ_API_KEY":     "https://console.groq.com",
+            "GEMINI_API_KEY":   "https://aistudio.google.com  → Get API key",
+            "GITHUB_TOKEN":    "https://github.com/settings/tokens",
+            "MISTRAL_API_KEY": "https://console.mistral.ai  → API Keys",
+            "CEREBRAS_API_KEY": "https://cloud.cerebras.ai  → API Keys",
         }
         for m in missing:
             if m in hints:
@@ -68,19 +72,21 @@ def _ask_provider() -> str:
     """Pregunta al usuario qué proveedor de IA usar y devuelve 'vpn', 'groq' o 'gemini'."""
     console.print(Panel.fit(
         "[bold]Selecciona el proveedor de IA:[/]\n\n"
-        "  [green]1[/green] · GitHub Models [dim](gpt-4o-mini)[/dim]          — dentro de VPN\n"
-        "  [yellow]2[/yellow] · Groq         [dim](llama-3.3-70b)[/dim]       — sin VPN · 100k tokens/día  [bold]← recomendado[/bold]\n"
-        "  [cyan]3[/cyan] · Google Gemini [dim](gemini-2.0-flash)[/dim]    — sin VPN · ~1M tokens/día GRATIS",
+        "  [green]1[/green] · GitHub Models [dim](gpt-4o-mini)[/dim]           — dentro de VPN\n"
+        "  [yellow]2[/yellow] · Groq         [dim](llama-3.3-70b)[/dim]        — 100k tokens/día\n"
+        "  [cyan]3[/cyan] · Google Gemini [dim](gemini-2.0-flash)[/dim]     — ~1M tokens/día gratis\n"
+        "  [magenta]4[/magenta] · Mistral      [dim](mistral-small)[/dim]       — gratis · function calling nativo  [bold]← recomendado[/bold]\n"
+        "  [bright_cyan]5[/bright_cyan] · Cerebras     [dim](llama-3.3-70b)[/dim]       — ultrarrápido · gratis",
         title="[bold blue]GarminCoach — Proveedor de IA[/]",
         border_style="blue",
     ))
     choice = Prompt.ask(
         "  Tu elección",
-        choices=["1", "2", "3"],
-        default="2",
+        choices=["1", "2", "3", "4", "5"],
+        default="4",
         case_sensitive=False,
     )
-    return {"1": "vpn", "2": "groq", "3": "gemini"}[choice]
+    return {"1": "vpn", "2": "groq", "3": "gemini", "4": "mistral", "5": "cerebras"}[choice]
 
 
 def _ask_tool_mode() -> bool:
@@ -157,6 +163,16 @@ async def main() -> None:
                 console.print(Markdown(response))
             except Exception as e:
                 console.print(f"\n[bold red]Error en el Agente:[/] {e}")
+
+        # Al salir de la sesión, generar y guardar resumen para memoria futura
+        if agent.conversation_history:
+            try:
+                with console.status("[dim]Guardando resumen de sesión...[/]"):
+                    summary = await agent.generate_session_summary()
+                agent.save_session_summary(summary)
+                console.print("[dim]✓ Sesión guardada en memoria[/]")
+            except Exception:
+                pass
 
         # Al salir de la sesión, mostrar resumen de tokens gastados
         p_tokens = agent.total_prompt_tokens

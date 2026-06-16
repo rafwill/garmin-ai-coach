@@ -1,19 +1,21 @@
 # 🏃‍♂️ Garmin AI Coach
 
-**Garmin AI Coach** es un asistente y entrenador deportivo personal inteligente. Combina modelos de lenguaje (LLM) con tus datos deportivos reales de Garmin a través del **servidor MCP [`garmin_mcp`](https://github.com/Taxuspt/garmin_mcp)** (110+ herramientas), que se gestiona automáticamente vía `uvx` sin necesidad de instalación manual.
+**Garmin AI Coach** es un asistente y entrenador deportivo personal inteligente. Combina modelos de lenguaje (LLM) con tus datos deportivos reales de Garmin a través del **servidor MCP [`garmin_mcp`](https://github.com/Taxuspt/garmin_mcp)** (126 herramientas), que se gestiona automáticamente vía `uvx` sin necesidad de instalación manual.
 
-El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbral de lactato, puntuación de resistencia...), tus récords personales históricos y tus actividades recientes para darte recomendaciones personalizadas, planes de entrenamiento y análisis de ritmos **100% basados en tus datos reales de Garmin Connect**.
+El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbral de lactato, puntuación de resistencia...), tus récords personales históricos y tus actividades recientes para darte recomendaciones personalizadas, planes de entrenamiento y análisis de ritmos **100% basados en tus datos reales de Garmin Connect**. Con memoria persistente entre sesiones, recuerda lo que habéis hablado en conversaciones anteriores.
 
 ---
 
 ## ✨ Características clave
 
-* **🧠 Tres proveedores de IA en la nube:**
-  | Opción | Modelo | Límite gratuito | Requiere |
-  |--------|--------|-----------------|----------|
-  | **Google Gemini** *(recomendado)* | `gemini-2.0-flash` | ~1M tokens/día | API key gratuita |
-  | **Groq** | `llama-3.3-70b-versatile` | 100k tokens/día | API key gratuita |
-  | **GitHub Models** | `gpt-4o-mini` | — | GitHub token + VPN |
+* **🧠 Cinco proveedores de IA (todos gratuitos salvo VPN):**
+  | # | Opción | Modelo | Límite gratuito | Requiere |
+  |---|--------|--------|-----------------|----------|
+  | 1 | **GitHub Models** | `gpt-4o-mini` | — | GitHub token + VPN |
+  | 2 | **Groq** | `llama-3.3-70b-versatile` | 100k tokens/día | API key gratuita |
+  | 3 | **Google Gemini** | `gemini-2.0-flash` | ~1M tokens/día | API key gratuita |
+  | 4 | **Mistral** *(recomendado)* | `mistral-small-latest` | ~1B tokens/mes | API key gratuita |
+  | 5 | **Cerebras** | `llama-3.3-70b` | generoso | API key gratuita |
 
 * **⌚ 126 herramientas de Garmin Connect:**
   - Actividades, zonas FC, splits, progreso, récords personales
@@ -25,8 +27,10 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
   - Los tokens OAuth se guardan una sola vez en `~/.garminconnect` (válidos ~6 meses).
   - No se almacenan contraseñas en texto plano en ningún proceso del agente.
 
-* **💾 Memoria de perfil de usuario:**
-  - Historial de sesiones resumido en `memory/user_profile.json`.
+* **💾 Memoria persistente entre sesiones:**
+  - Al salir, el agente genera automáticamente un resumen compacto de la sesión con el propio LLM.
+  - Los últimos 5 resúmenes se inyectan como contexto al arrancar la siguiente sesión — el agente recuerda lo que habéis hablado.
+  - Los datos se guardan en `memory/user_profile.json`.
   - Control local de cuota de Gemini en `memory/gemini_daily_usage.json` (hash SHA-256 de la API key, nunca en claro).
 
 * **🔧 Sin dependencias de Node.js:**
@@ -41,7 +45,7 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
 | **Python** | 3.10+ | Desarrollado con 3.14 |
 | **uv / uvx** | cualquiera | Gestiona el servidor MCP automáticamente |
 | **Cuenta Garmin Connect** | — | Credenciales de acceso |
-| **API key** de Gemini o Groq | — | Gratuitas (ver `.env.example`) |
+| **API key** de Mistral, Groq, Gemini o Cerebras | — | Gratuitas (ver `.env.example`) |
 
 ### Instalar uv (si aún no lo tienes)
 ```powershell
@@ -93,10 +97,14 @@ python -m agent.main
 El agente descargará automáticamente el servidor MCP en el primer arranque (vía `uvx`). Después aparecerá el menú de proveedores:
 
 ```
-  1 · GitHub Models (gpt-4o-mini)      — dentro de VPN
-  2 · Groq         (llama-3.3-70b)     — sin VPN · 100k tokens/día
-  3 · Google Gemini (gemini-2.0-flash) — sin VPN · ~1M tokens/día GRATIS
+  1 · GitHub Models (gpt-4o-mini)           — dentro de VPN
+  2 · Groq         (llama-3.3-70b)          — 100k tokens/día
+  3 · Google Gemini (gemini-2.0-flash)      — ~1M tokens/día gratis
+  4 · Mistral      (mistral-small)          — gratis · function calling nativo  ← recomendado
+  5 · Cerebras     (llama-3.3-70b)          — ultrarrápido · gratis
 ```
+
+A continuación se selecciona el modo de herramientas y el agente conecta con Garmin Connect.
 
 ### Ejemplos de preguntas
 - *"¿Cuál ha sido mi mejor ritmo en media maratón y qué necesito para bajar de 1h45?"*
@@ -138,17 +146,18 @@ Puedes fijar el subconjunto permanentemente añadiendo `GARMIN_ENABLED_TOOLS=too
 garmin-ai-coach/
 ├── agent/
 │   ├── __init__.py
-│   ├── main.py            # Punto de entrada: menú de proveedor e interfaz de chat.
+│   ├── main.py            # Punto de entrada: menú de proveedor, herramientas e interfaz de chat.
 │   ├── mcp_client.py      # Cliente MCP asíncrono — lanza garmin_mcp vía uvx.
-│   └── trainer_agent.py   # Agente: lógica de tool-calling, adaptadores LLM, memoria.
-├── memory/
-│   ├── user_profile.json       # Historial de sesiones y perfil dinámico del deportista.
+│   └── trainer_agent.py   # Agente: tool-calling, adaptadores LLM, memoria persistente.
+├── memory/                # Generado automáticamente, no subir a git.
+│   ├── user_profile.json       # Resúmenes de sesiones y perfil dinámico del deportista.
 │   └── gemini_daily_usage.json # Control de cuota diaria de Gemini (API key hasheada).
 ├── prompts/
 │   └── system_prompt.md   # Personalidad e instrucciones del entrenador GarminCoach.
 ├── .env                   # Credenciales locales (no subir a git).
 ├── .env.example           # Plantilla de configuración con comentarios.
 ├── requirements.txt       # Dependencias Python.
+├── TODO.md                # Mejoras futuras planificadas.
 └── README.md
 ```
 

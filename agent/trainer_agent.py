@@ -49,6 +49,30 @@ def _save_history_entry(role: str, content: str) -> None:
     profile_file.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _load_session_summaries() -> list[dict]:
+    """Carga los resúmenes de sesiones anteriores."""
+    profile_file = MEMORY_DIR / "user_profile.json"
+    if not profile_file.exists():
+        return []
+    try:
+        data = json.loads(profile_file.read_text(encoding="utf-8"))
+        return data.get("session_summaries", [])
+    except Exception:
+        return []
+
+
+def _persist_session_summary(summary: str) -> None:
+    """Guarda el resumen de la sesión actual en memoria persistente."""
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    profile_file = MEMORY_DIR / "user_profile.json"
+    profile = _load_user_profile()
+    summaries = profile.get("session_summaries", [])
+    summaries.append({"date": date.today().isoformat(), "summary": summary})
+    # Mantener solo los últimos 10 resúmenes (≈10 semanas de uso)
+    profile["session_summaries"] = summaries[-10:]
+    profile_file.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _get_gemini_daily_file() -> Path:
     """Devuelve la ruta al archivo de uso diario de Gemini."""
     return MEMORY_DIR / "gemini_daily_usage.json"
@@ -705,9 +729,25 @@ class TrainerAgent:
             # API nativa de Gemini con x-goog-api-key (soporta claves AQ.)
             _gemini_key = os.environ["GEMINI_API_KEY"]
             self.client = _GeminiClient(api_key=_gemini_key)
-            self.model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+            self.model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        elif provider == "mistral":
+            # Mistral La Plateforme — API compatible OpenAI, capa gratuita generosa
+            # Registro en https://console.mistral.ai
+            self.client = AsyncOpenAI(
+                base_url="https://api.mistral.ai/v1",
+                api_key=os.environ["MISTRAL_API_KEY"],
+            )
+            self.model = os.environ.get("MISTRAL_MODEL", "mistral-small-latest")
+        elif provider == "cerebras":
+            # Cerebras — inferencia ultrarrápida, API compatible OpenAI, capa gratuita
+            # Registro en https://cloud.cerebras.ai
+            self.client = AsyncOpenAI(
+                base_url="https://api.cerebras.ai/v1",
+                api_key=os.environ["CEREBRAS_API_KEY"],
+            )
+            self.model = os.environ.get("CEREBRAS_MODEL", "llama-3.3-70b")
         else:
-            raise ValueError(f"Proveedor desconocido: '{provider}'. Opciones válidas: 'vpn', 'groq', 'gemini'.")
+            raise ValueError(f"Proveedor desconocido: '{provider}'. Opciones válidas: 'vpn', 'groq', 'gemini', 'mistral', 'cerebras'.")
         self.mcp_session = mcp_session
         self.system_prompt = _load_system_prompt()
         self.user_profile = _load_user_profile()
@@ -719,9 +759,17 @@ class TrainerAgent:
         self.total_completion_tokens = 0
 
     async def initialize(self) -> None:
-        """Carga las herramientas disponibles del MCP."""
+        """Carga las herramientas disponibles del MCP y restaura el historial reciente."""
         tools = await list_available_tools(self.mcp_session)
         self.tools_schema = _build_tools_schema(tools)
+
+        # Restaurar los últimos 6 mensajes del historial persistido (3 intercambios)
+        saved_history = self.user_profile.get("history", [])
+        for entry in saved_history[-6:]:
+            role = entry.get("role")
+            content = entry.get("content", "")
+            if role in ("user", "assistant") and content:
+                self.conversation_history.append({"role": role, "content": content})
 
     def get_gemini_daily_info(self) -> dict:
         """Devuelve información sobre el uso diario de tokens de Gemini."""
@@ -775,7 +823,22 @@ class TrainerAgent:
                 f"- Objetivo principal: {g.get('primary', 'no definido')}\n"
                 f"- Carrera objetivo: {g.get('target_race', 'ninguna')}\n"
             )
-        return self.system_prompt + date_context + profile_context
+
+        # Incluir resúmenes de sesiones anteriores para memoria a largo plazo
+        memory_context = ""
+        summaries = _load_session_summaries()
+        if summaries:
+            recent = summaries[-5:]  # últimas 5 sesiones
+            lines = "\n".join(
+                f"- **{s['date']}**: {s['summary']}" for s in recent
+            )
+            memory_context = (
+                f"\n\n## Memoria de sesiones anteriores\n"
+                f"Estas son las conversaciones previas resumidas. Úsalas como contexto para dar continuidad:\n"
+                f"{lines}\n"
+            )
+
+        return self.system_prompt + date_context + profile_context + memory_context
 
     def _build_messages(self, user_message: str) -> list[dict]:
         """Construye el array de mensajes para la llamada al LLM.
@@ -869,3 +932,40 @@ class TrainerAgent:
             _save_history_entry("assistant", assistant_reply)
 
             return assistant_reply
+
+    async def generate_session_summary(self) -> str:
+        """Genera un resumen compacto de la sesión actual usando el LLM."""
+        if not self.conversation_history:
+            return ""
+        # Tomar los últimos 30 mensajes para el resumen (evitar contexto excesivo)
+        history_text = "\n".join(
+            f"{msg['role'].upper()}: {msg['content'][:600]}"
+            for msg in self.conversation_history[-30:]
+            if msg.get("content")
+        )
+        summary_prompt = (
+            "Resume en MÁXIMO 250 palabras los puntos clave de esta sesión de entrenamiento. "
+            "Incluye: métricas destacadas (HRV, VO₂max, sueño, estrés…), hallazgos importantes, "
+            "recomendaciones dadas al deportista, y cualquier dato personal relevante que deba "
+            "recordarse en futuras sesiones. Sé conciso y factual, sin saludos ni introducciones.\n\n"
+            f"CONVERSACIÓN:\n{history_text}"
+        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": summary_prompt}],
+            )
+            return (response.choices[0].message.content or "").strip()
+        except Exception:
+            # Fallback: resumen básico con los temas del usuario
+            topics = [
+                msg["content"][:80]
+                for msg in self.conversation_history
+                if msg.get("role") == "user" and msg.get("content")
+            ]
+            return f"Temas tratados: {' | '.join(topics[:5])}"
+
+    def save_session_summary(self, summary: str) -> None:
+        """Persiste el resumen de sesión en disco."""
+        if summary:
+            _persist_session_summary(summary)
