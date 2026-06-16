@@ -706,17 +706,7 @@ class TrainerAgent:
                 api_key=os.environ["GROQ_API_KEY"],
             )
             self.model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-        elif provider == "local":
-            # Modelo local (Ollama o LM Studio)
-            # Por defecto busca un endpoint compatible con OpenAI en localhost
-            local_url = os.environ.get("LOCAL_LLM_URL", "http://localhost:11434/v1")
-            local_key = os.environ.get("LOCAL_LLM_API_KEY", "no-needed")
-            self.client = AsyncOpenAI(
-                base_url=local_url,
-                api_key=local_key,
-            )
-            self.model = os.environ.get("LOCAL_LLM_MODEL", "mistral")
-        else:  # gemini
+        elif provider == "gemini":
             # API nativa de Gemini con x-goog-api-key (soporta claves AQ.)
             _gemini_key = os.environ["GEMINI_API_KEY"]
             self.client = _GeminiClient(api_key=_gemini_key)
@@ -819,16 +809,6 @@ class TrainerAgent:
                     tool_choice="auto" if self.tools_schema else None,
                 )
             except Exception as e:
-                # Comprobar si es un fallo de conexión del LLM local
-                err_msg = str(e)
-                if "connection" in err_msg.lower() or "connect" in err_msg.lower():
-                    local_url = os.environ.get("LOCAL_LLM_URL", "http://localhost:11434/v1")
-                    raise Exception(
-                        f"No se pudo conectar al LLM local en {local_url}.\n"
-                        f"Asegúrate de que tu servidor de LLM local (Ollama en el puerto 11434, o LM Studio en el puerto 1234) "
-                        f"esté encendido y ejecutándose antes de iniciar el chat, y que el modelo '{self.model}' esté descargado.\n"
-                        f"Error original: {err_msg}"
-                    ) from e
                 raise e
 
             # Track and log token usage

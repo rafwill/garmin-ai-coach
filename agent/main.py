@@ -41,7 +41,6 @@ _PROVIDER_INFO = {
     "vpn":    ("GITHUB_TOKEN",  "GitHub Models (gpt-4o-mini)",          "VPN activa"),
     "groq":   ("GROQ_API_KEY",  "Groq (llama-3.3-70b-versatile)",       "100k tokens/día"),
     "gemini": ("GEMINI_API_KEY", "Google Gemini (gemini-2.0-flash)",     "~1M tokens/día · recomendado"),
-    "local":  ("",              "Mistral Local (Ollama/LM Studio)",     "100% privado · Sin coste"),
 }
 
 
@@ -79,18 +78,17 @@ def _ask_provider() -> str:
         "[bold]Selecciona el proveedor de IA:[/]\n\n"
         "  [green]1[/green] · GitHub Models [dim](gpt-4o-mini)[/dim]          — dentro de VPN\n"
         "  [yellow]2[/yellow] · Groq         [dim](llama-3.3-70b)[/dim]       — sin VPN · 100k tokens/día\n"
-        "  [cyan]3[/cyan] · Google Gemini [dim](gemini-2.0-flash)[/dim]    — sin VPN · [bold]~1M tokens/día GRATIS[/bold]\n"
-        "  [magenta]4[/magenta] · Mistral Local [dim](Ollama/LM Studio)[/dim]     — [bold]100% privado · Ejecución local[/bold]",
+        "  [cyan]3[/cyan] · Google Gemini [dim](gemini-2.0-flash)[/dim]    — sin VPN · [bold]~1M tokens/día GRATIS[/bold]",
         title="[bold blue]GarminCoach — Proveedor de IA[/]",
         border_style="blue",
     ))
     choice = Prompt.ask(
         "  Tu elección",
-        choices=["1", "2", "3", "4"],
+        choices=["1", "2", "3"],
         default="3",
         case_sensitive=False,
     )
-    return {"1": "vpn", "2": "groq", "3": "gemini", "4": "local"}[choice]
+    return {"1": "vpn", "2": "groq", "3": "gemini"}[choice]
 
 
 async def main() -> None:
