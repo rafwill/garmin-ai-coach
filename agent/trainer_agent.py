@@ -9,7 +9,7 @@ import ssl
 import json
 import asyncio
 import hashlib
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
@@ -649,6 +649,37 @@ class _GeminiClient:
         self.chat = _GeminiChat(api_key)
 
 
+# Palabras clave de fecha que los modelos locales suelen enviar en varios idiomas
+_TODAY_KEYWORDS = {"hoy", "today", "今日", "今天", "ahora", "now", "current", "actual", "este dia"}
+_YESTERDAY_KEYWORDS = {"ayer", "yesterday", "昨日", "昨天"}
+
+
+def _normalize_date_args(arguments: dict) -> dict:
+    """Normaliza parámetros de fecha de las llamadas a herramientas.
+
+    Convierte palabras clave de fecha en cualquier idioma al formato ISO YYYY-MM-DD
+    que requiere la API de Garmin Connect. Previene los HTTP 404 que ocurren cuando
+    los modelos pequeños locales pasan 'hoy', 'ayer', '今日', etc. como valor de fecha.
+    """
+    DATE_FIELDS = {"date", "startDate", "endDate", "start_date", "end_date"}
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    result = {}
+    for key, value in arguments.items():
+        if key in DATE_FIELDS and isinstance(value, str):
+            v_lower = value.strip().lower()
+            if v_lower in _TODAY_KEYWORDS:
+                result[key] = today.isoformat()
+            elif v_lower in _YESTERDAY_KEYWORDS:
+                result[key] = yesterday.isoformat()
+            else:
+                result[key] = value
+        else:
+            result[key] = value
+    return result
+
+
 class TrainerAgent:
     """
     Agente entrenador personal que usa OpenAI + Garmin MCP.
@@ -735,7 +766,16 @@ class TrainerAgent:
         }
 
     def _build_system_prompt(self) -> str:
-        """Construye el system prompt incluyendo el perfil del usuario si existe."""
+        """Construye el system prompt incluyendo la fecha actual y el perfil del usuario."""
+        today_str = date.today().isoformat()
+        yesterday_str = (date.today() - timedelta(days=1)).isoformat()
+        date_context = (
+            f"\n\n## Fecha actual\n"
+            f"- Hoy es: **{today_str}** (formato ISO YYYY-MM-DD)\n"
+            f"- Ayer fue: **{yesterday_str}**\n"
+            f"- OBLIGATORIO: cuando pases fechas como parámetros a herramientas, SIEMPRE usa formato ISO YYYY-MM-DD exacto (ej: `{today_str}`). "
+            f"NUNCA uses palabras como 'hoy', 'ayer', 'today', 'yesterday' ni caracteres de otros idiomas en parámetros de herramientas.\n"
+        )
         profile_context = ""
         if self.user_profile.get("personal", {}).get("name"):
             p = self.user_profile["personal"]
@@ -748,7 +788,7 @@ class TrainerAgent:
                 f"- Objetivo principal: {g.get('primary', 'no definido')}\n"
                 f"- Carrera objetivo: {g.get('target_race', 'ninguna')}\n"
             )
-        return self.system_prompt + profile_context
+        return self.system_prompt + date_context + profile_context
 
     def _build_messages(self, user_message: str) -> list[dict]:
         """Construye el array de mensajes para la llamada al LLM.
@@ -824,6 +864,8 @@ class TrainerAgent:
                     # esperan un objeto, no null → convertir a {}
                     if arguments is None:
                         arguments = {}
+                    # Normalizar fechas: convertir palabras como 'hoy'/'ayer' a ISO
+                    arguments = _normalize_date_args(arguments)
 
                     print(f"  [debug] Ejecutando: {tool_name}({arguments})")
                     raw_result = await call_tool(
