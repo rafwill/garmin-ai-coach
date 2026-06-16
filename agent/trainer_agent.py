@@ -649,7 +649,7 @@ class _GeminiClient:
         self.chat = _GeminiChat(api_key)
 
 
-# Palabras clave de fecha que los modelos locales suelen enviar en varios idiomas
+# Palabras clave de fecha que algunos LLMs envían en lugar de fechas ISO
 _TODAY_KEYWORDS = {"hoy", "today", "今日", "今天", "ahora", "now", "current", "actual", "este dia"}
 _YESTERDAY_KEYWORDS = {"ayer", "yesterday", "昨日", "昨天"}
 
@@ -657,9 +657,9 @@ _YESTERDAY_KEYWORDS = {"ayer", "yesterday", "昨日", "昨天"}
 def _normalize_date_args(arguments: dict) -> dict:
     """Normaliza parámetros de fecha de las llamadas a herramientas.
 
-    Convierte palabras clave de fecha en cualquier idioma al formato ISO YYYY-MM-DD
-    que requiere la API de Garmin Connect. Previene los HTTP 404 que ocurren cuando
-    los modelos pequeños locales pasan 'hoy', 'ayer', '今日', etc. como valor de fecha.
+    Convierte palabras clave de fecha al formato ISO YYYY-MM-DD que requiere
+    la API de Garmin Connect. Previene HTTP 404 cuando el LLM pasa 'hoy',
+    'ayer', 'today', etc. como valor de fecha en lugar de la cadena ISO.
     """
     DATE_FIELDS = {"date", "startDate", "endDate", "start_date", "end_date"}
     today = date.today()
@@ -710,7 +710,9 @@ class TrainerAgent:
             # API nativa de Gemini con x-goog-api-key (soporta claves AQ.)
             _gemini_key = os.environ["GEMINI_API_KEY"]
             self.client = _GeminiClient(api_key=_gemini_key)
-            self.model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+            self.model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        else:
+            raise ValueError(f"Proveedor desconocido: '{provider}'. Opciones válidas: 'vpn', 'groq', 'gemini'.")
         self.mcp_session = mcp_session
         self.system_prompt = _load_system_prompt()
         self.user_profile = _load_user_profile()
@@ -801,15 +803,12 @@ class TrainerAgent:
         iteration = 0
         while True:
             iteration += 1
-            try:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    tools=self.tools_schema if self.tools_schema else None,
-                    tool_choice="auto" if self.tools_schema else None,
-                )
-            except Exception as e:
-                raise e
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=self.tools_schema if self.tools_schema else None,
+                tool_choice="auto" if self.tools_schema else None,
+            )
 
             # Track and log token usage
             if getattr(response, "usage", None):

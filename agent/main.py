@@ -40,7 +40,7 @@ console = Console()
 _PROVIDER_INFO = {
     "vpn":    ("GITHUB_TOKEN",  "GitHub Models (gpt-4o-mini)",          "VPN activa"),
     "groq":   ("GROQ_API_KEY",  "Groq (llama-3.3-70b-versatile)",       "100k tokens/día"),
-    "gemini": ("GEMINI_API_KEY", "Google Gemini (gemini-2.0-flash)",     "~1M tokens/día · recomendado"),
+    "gemini": ("GEMINI_API_KEY", "Google Gemini (gemini-2.5-flash)",     "~1M tokens/día · recomendado"),
 }
 
 
@@ -73,7 +73,7 @@ def _check_env(provider: str) -> None:
 
 
 def _ask_provider() -> str:
-    """Pregunta al usuario qué proveedor de IA usar y devuelve 'vpn', 'groq', 'gemini' o 'local'."""
+    """Pregunta al usuario qué proveedor de IA usar y devuelve 'vpn', 'groq' o 'gemini'."""
     console.print(Panel.fit(
         "[bold]Selecciona el proveedor de IA:[/]\n\n"
         "  [green]1[/green] · GitHub Models [dim](gpt-4o-mini)[/dim]          — dentro de VPN\n"
