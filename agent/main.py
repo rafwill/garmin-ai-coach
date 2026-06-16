@@ -19,14 +19,6 @@ from rich.rule import Rule
 # Cargar variables de entorno desde .env
 load_dotenv()
 
-# Configurar el entorno para Node.js (subproceso npx del MCP de Garmin)
-# El proxy corporativo Zscaler hace MITM en SSL; Node.js no confía en su CA por defecto.
-# NODE_TLS_REJECT_UNAUTHORIZED=0 deshabilita la verificación SSL en Node.js.
-_zscaler_pem = Path(__file__).parent.parent / "zscaler-ca.pem"
-if _zscaler_pem.exists():
-    os.environ["NODE_EXTRA_CA_CERTS"] = str(_zscaler_pem)
-os.environ["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
-
 # Añadir el directorio raíz al path para imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

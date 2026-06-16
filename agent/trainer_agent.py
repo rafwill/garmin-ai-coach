@@ -357,9 +357,11 @@ ESSENTIAL_TOOLS = {
     # Salud diaria
     "get_daily_summary", "get_heart_rate", "get_body_battery",
     "get_stress", "get_intensity_minutes", "get_resting_heart_rate",
+    "get_steps", "get_respiration", "get_spo2", "get_hydration",
     # Rendimiento
     "get_training_readiness", "get_training_status", "get_hrv",
     "get_vo2max", "get_race_predictions", "get_personal_records",
+    "get_endurance_score", "get_fitness_age", "get_lactate_threshold",
     # Sueño
     "get_sleep_data",
     # Composición corporal
