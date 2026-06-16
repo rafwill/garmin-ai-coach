@@ -69,23 +69,42 @@ def _ask_provider() -> str:
     console.print(Panel.fit(
         "[bold]Selecciona el proveedor de IA:[/]\n\n"
         "  [green]1[/green] · GitHub Models [dim](gpt-4o-mini)[/dim]          — dentro de VPN\n"
-        "  [yellow]2[/yellow] · Groq         [dim](llama-3.3-70b)[/dim]       — sin VPN · 100k tokens/día\n"
-        "  [cyan]3[/cyan] · Google Gemini [dim](gemini-2.0-flash)[/dim]    — sin VPN · [bold]~1M tokens/día GRATIS[/bold]",
+        "  [yellow]2[/yellow] · Groq         [dim](llama-3.3-70b)[/dim]       — sin VPN · 100k tokens/día  [bold]← recomendado[/bold]\n"
+        "  [cyan]3[/cyan] · Google Gemini [dim](gemini-2.0-flash)[/dim]    — sin VPN · ~1M tokens/día GRATIS",
         title="[bold blue]GarminCoach — Proveedor de IA[/]",
         border_style="blue",
     ))
     choice = Prompt.ask(
         "  Tu elección",
         choices=["1", "2", "3"],
-        default="3",
+        default="2",
         case_sensitive=False,
     )
     return {"1": "vpn", "2": "groq", "3": "gemini"}[choice]
 
 
+def _ask_tool_mode() -> bool:
+    """Pregunta al usuario si quiere usar Essential Tools (28) o todas las herramientas (126)."""
+    console.print(Panel.fit(
+        "[bold]Selecciona el modo de herramientas:[/]\n\n"
+        "  [green]1[/green] · Essential Tools [dim](28 tools)[/dim]   — más rápido · menor consumo de tokens  [bold]← recomendado[/bold]\n"
+        "  [yellow]2[/yellow] · Todas          [dim](126 tools)[/dim]  — acceso completo · más tokens por petición",
+        title="[bold blue]GarminCoach — Herramientas[/]",
+        border_style="blue",
+    ))
+    choice = Prompt.ask(
+        "  Tu elección",
+        choices=["1", "2"],
+        default="1",
+        case_sensitive=False,
+    )
+    return choice == "1"
+
+
 async def main() -> None:
     provider = _ask_provider()
     _check_env(provider)
+    essential_only = _ask_tool_mode()
 
     _, label, note = _PROVIDER_INFO[provider]
     console.print(Panel.fit(
@@ -95,7 +114,7 @@ async def main() -> None:
         border_style="green",
     ))
 
-    async with garmin_mcp_session() as session:
+    async with garmin_mcp_session(essential_only=essential_only) as session:
         agent = TrainerAgent(mcp_session=session, provider=provider)
 
         console.print("[dim]Cargando herramientas de Garmin...[/]")

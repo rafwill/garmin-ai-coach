@@ -6,14 +6,12 @@ y expone sus herramientas para que el agente las use.
 
 import os
 import shutil
-import json
-import asyncio
 from contextlib import asynccontextmanager
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-def _get_server_params() -> StdioServerParameters:
+def _get_server_params(essential_only: bool = True) -> StdioServerParameters:
     """Construye los parámetros de arranque del servidor MCP de Garmin."""
     email = os.environ.get("GARMIN_EMAIL")
     password = os.environ.get("GARMIN_PASSWORD")
@@ -33,6 +31,35 @@ def _get_server_params() -> StdioServerParameters:
             "o visita: https://docs.astral.sh/uv/getting-started/installation/"
         )
 
+    # Herramientas esenciales para un agente entrenador personal.
+    # Reduce el contexto de ~31k tokens (126 tools) a ~5k tokens (~25 tools).
+    # Se puede sobreescribir con la variable GARMIN_ENABLED_TOOLS en .env.
+    _DEFAULT_TOOLS = (
+        # Actividades
+        "get_activities,get_activity,"
+        # Salud diaria (versiones ligeras donde existen)
+        "get_stats,get_sleep_summary,get_sleep_data,"
+        "get_heart_rates_summary,get_stress_summary,get_respiration_summary,"
+        "get_body_battery,get_rhr_day,get_spo2_data,get_hrv_data,"
+        "get_daily_steps,get_hydration_data,"
+        # Composición corporal
+        "get_body_composition,"
+        # Preparación y entrenamiento
+        "get_training_readiness,get_morning_training_readiness,"
+        "get_training_status,get_training_load_trend,"
+        "get_hrv_trend,get_vo2max_trend,"
+        # Rendimiento avanzado
+        "get_endurance_score,get_fitnessage_data,"
+        "get_lactate_threshold,get_cycling_ftp,"
+        # Tendencias semanales
+        "get_weekly_steps,get_weekly_intensity_minutes,get_weekly_stress"
+    )
+    # Si essential_only=False y no hay override en .env, no se filtra (todas las herramientas)
+    if essential_only:
+        enabled_tools = os.environ.get("GARMIN_ENABLED_TOOLS", _DEFAULT_TOOLS)
+    else:
+        enabled_tools = os.environ.get("GARMIN_ENABLED_TOOLS", "")
+
     return StdioServerParameters(
         command=uvx_cmd,
         args=[
@@ -44,12 +71,13 @@ def _get_server_params() -> StdioServerParameters:
             **os.environ,
             "GARMIN_EMAIL": email,
             "GARMIN_PASSWORD": password,
+            **({"GARMIN_ENABLED_TOOLS": enabled_tools} if enabled_tools else {}),
         },
     )
 
 
 @asynccontextmanager
-async def garmin_mcp_session():
+async def garmin_mcp_session(essential_only: bool = True):
     """
     Context manager que inicia el servidor MCP de Garmin y devuelve
     una sesión lista para llamar herramientas.
@@ -58,7 +86,7 @@ async def garmin_mcp_session():
         async with garmin_mcp_session() as session:
             result = await session.call_tool("get_last_activity", {})
     """
-    params = _get_server_params()
+    params = _get_server_params(essential_only=essential_only)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
