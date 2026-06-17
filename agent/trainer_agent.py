@@ -26,6 +26,9 @@ MEMORY_DIR  = Path(__file__).parent.parent / "memory"
 _PROFILE_FILE = MEMORY_DIR / "user_profile.json"    # datos personales, objetivos, salud
 _CONTEXT_FILE = MEMORY_DIR / "session_context.json"  # historial de mensajes y resúmenes
 
+# Garantizar que el directorio de memoria existe desde el primer import
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def _load_system_prompt() -> str:
     """Carga el system prompt del entrenador desde el archivo Markdown."""
