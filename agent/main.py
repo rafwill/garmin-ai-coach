@@ -445,8 +445,23 @@ def _auto_select_provider() -> str:
     return provider
 
 
-def _ask_tool_mode() -> bool:
-    """Pregunta al usuario si quiere usar Essential Tools (28) o todas las herramientas (126)."""
+def _ask_tool_mode(provider: str) -> bool:
+    """Pregunta al usuario si quiere usar Essential Tools (28) o todas las herramientas (126).
+
+    Con GitHub Models (vpn) se fuerza Essential Tools: los schemas de 126 herramientas
+    ya superan el límite de 8k tokens antes de enviar ninguna pregunta.
+    """
+    if provider == "vpn":
+        console.print(Panel.fit(
+            "[yellow]GitHub Models[/yellow] tiene un límite de 8 000 tokens por request.\n"
+            "Con 126 herramientas los schemas solos superan ese límite, por lo que\n"
+            "se usa automáticamente [bold]Essential Tools (30 tools)[/bold].\n"
+            "[dim]Para usar todas las herramientas, sal de la VPN y reinicia (usará Gemini).[/dim]",
+            title="[bold blue]GarminCoach — Herramientas[/]",
+            border_style="blue",
+        ))
+        return True  # essential_only=True
+
     console.print(Panel.fit(
         "[bold]Selecciona el modo de herramientas:[/]\n\n"
         "  [green]1[/green] · Essential Tools [dim](28 tools)[/dim]   — más rápido · menor consumo de tokens  [bold]← recomendado[/bold]\n"
@@ -466,7 +481,7 @@ def _ask_tool_mode() -> bool:
 async def main() -> None:
     provider = _auto_select_provider()
     _check_env(provider)
-    essential_only = _ask_tool_mode()
+    essential_only = _ask_tool_mode(provider)
 
     _, label, note = _PROVIDER_INFO[provider]
     console.print(Panel.fit(
