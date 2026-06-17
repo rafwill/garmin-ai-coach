@@ -59,6 +59,8 @@ def _get_server_params(essential_only: bool = True) -> StdioServerParameters:
         # Rendimiento avanzado
         "get_endurance_score,get_fitnessage_data,"
         "get_lactate_threshold,get_cycling_ftp,"
+        # Predicciones y récords personales
+        "get_race_predictions,get_personal_records,"
         # Tendencias semanales
         "get_weekly_steps,get_weekly_intensity_minutes,get_weekly_stress"
     )

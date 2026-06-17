@@ -401,6 +401,15 @@ async def main() -> None:
 
         # Paso 3: solo la primera vez (o si cambió la cuenta de Garmin)
         if _is_first_time():
+            # Si cambió la cuenta de Garmin, limpiar el perfil del usuario anterior
+            profile = _load_user_profile()
+            if profile.get("garmin_user_id") and profile.get("garmin_user_id") != _garmin_user_id():
+                console.print("[yellow]⚠ Cuenta de Garmin diferente detectada. Reiniciando objetivos y salud...[/]")
+                profile.pop("goals", None)
+                profile.pop("health", None)
+                profile.pop("personal", None)
+                profile.pop("setup_complete", None)
+                _save_user_profile(profile)
             _run_first_time_setup()
             agent.user_profile = _load_user_profile()
         console.print("[dim dimgray][debug] Inicio de la sesión. Tokens gastados: 0[/]")

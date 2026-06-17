@@ -941,9 +941,18 @@ class TrainerAgent:
         """
         messages = self._build_messages(user_message)
 
+        _MAX_TOOL_ITER = 15
         iteration = 0
         while True:
             iteration += 1
+            if iteration > _MAX_TOOL_ITER:
+                print(f"  [debug] Límite de {_MAX_TOOL_ITER} iteraciones de herramientas alcanzado. Abortando.")
+                assistant_reply = "[Lo siento, la consulta requirió demasiadas llamadas a herramientas. Por favor, reformula tu pregunta de forma más concreta.]"
+                self.conversation_history.append({"role": "user", "content": user_message})
+                self.conversation_history.append({"role": "assistant", "content": assistant_reply})
+                _save_history_entry("user", user_message)
+                _save_history_entry("assistant", assistant_reply)
+                return assistant_reply
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
