@@ -5,10 +5,13 @@ Interfaz de conversación en terminal.
 """
 
 import asyncio
+import hashlib
+import json
 import os
 import sys
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
@@ -19,11 +22,210 @@ from rich.rule import Rule
 # Cargar variables de entorno desde .env
 load_dotenv()
 
+# Parchear SSL para usar el almacén de certificados del sistema (necesario con Zscaler)
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 # Añadir el directorio raíz al path para imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent.mcp_client import garmin_mcp_session
-from agent.trainer_agent import TrainerAgent
+from agent.trainer_agent import TrainerAgent, _load_user_profile, _save_user_profile
+
+
+_MEMORY_DIR = Path(__file__).parent.parent / "memory"
+
+
+def _garmin_user_id() -> str:
+    """Devuelve un identificador único basado en el email de Garmin configurado en .env."""
+    email = os.environ.get("GARMIN_EMAIL", "").strip().lower()
+    return hashlib.sha256(email.encode()).hexdigest()[:16] if email else "unknown"
+
+
+async def _sync_from_garmin(agent) -> None:
+    """
+    Siempre se ejecuta al arrancar.
+    Obtiene nombre, edad, género, peso y altura desde Garmin Connect
+    y actualiza el perfil local sin hacer ninguna pregunta.
+    """
+    console.print("[dim]Sincronizando datos personales desde Garmin Connect...[/]")
+    try:
+        garmin_data = await agent.fetch_garmin_personal_data()
+    except Exception:
+        garmin_data = {}
+
+    if not garmin_data:
+        console.print("[dim yellow]No se pudieron obtener datos personales de Garmin.[/]")
+        return
+
+    profile = _load_user_profile()
+    p = profile.setdefault("personal", {})
+    # Guardar qué usuario de Garmin generó estos datos
+    profile["garmin_user_id"] = _garmin_user_id()
+
+    updated = []
+    labels = {"name": "nombre", "age": "edad", "gender": "género",
+               "weight_kg": "peso", "height_cm": "altura"}
+    for field, value in garmin_data.items():
+        if p.get(field) != value:
+            p[field] = value
+            if field in labels:
+                updated.append(labels[field])
+
+    _save_user_profile(profile)
+    if updated:
+        console.print(f"[green]✓[/] Garmin → perfil actualizado: [dim]{', '.join(updated)}[/]")
+    else:
+        console.print("[dim]✓ Datos de Garmin sin cambios.[/]")
+
+
+def _is_first_time() -> bool:
+    """
+    Devuelve True si este usuario de Garmin no ha completado el setup de objetivos.
+    Se detecta por la ausencia de 'setup_complete' o por cambio de cuenta de Garmin.
+    """
+    profile = _load_user_profile()
+    current_uid = _garmin_user_id()
+    stored_uid = profile.get("garmin_user_id", "")
+    # Si cambió el usuario de Garmin, es como una primera vez
+    if stored_uid and stored_uid != current_uid:
+        return True
+    return not profile.get("setup_complete", False)
+
+
+def _ask_goals(profile: dict) -> None:
+    """Pregunta y guarda los campos de objetivos de entrenamiento."""
+    g = profile.setdefault("goals", {})
+    console.print("\n[bold]Objetivos de entrenamiento:[/]")
+
+    sport = Prompt.ask(
+        "  Deporte principal",
+        choices=["running", "trail running", "triatlón", "ciclismo", "otro", ""],
+        default=g.get("primary", ""),
+        show_choices=True,
+    )
+    if sport.strip():
+        g["primary"] = sport.strip()
+
+    hours = Prompt.ask(
+        "  Horas de entrenamiento por semana [dim](ej: 10)[/]",
+        default=str(g.get("weekly_training_hours", "")),
+    )
+    try:
+        if hours.strip():
+            g["weekly_training_hours"] = float(hours.strip().replace(",", "."))
+    except ValueError:
+        pass
+
+    race = Prompt.ask(
+        "  Próxima carrera/evento objetivo [dim](ej: Ultra PDA 55km)[/]",
+        default=g.get("target_race", ""),
+    )
+    if race.strip():
+        g["target_race"] = race.strip()
+
+    race_date = Prompt.ask(
+        "  Fecha del evento [dim](YYYY-MM-DD)[/]",
+        default=g.get("target_race_date", ""),
+    )
+    if race_date.strip():
+        g["target_race_date"] = race_date.strip()
+
+    target_time = Prompt.ask(
+        "  Tiempo objetivo [dim](ej: 3:30:00)[/]",
+        default=g.get("target_time", ""),
+    )
+    if target_time.strip():
+        g["target_time"] = target_time.strip()
+
+
+def _ask_health(profile: dict) -> None:
+    """Pregunta y guarda los campos de salud."""
+    h = profile.setdefault("health", {})
+    console.print("\n[bold]Salud y condiciones médicas:[/]")
+
+    current_injuries = ", ".join(h.get("injuries", []))
+    injuries_str = Prompt.ask(
+        "  Lesiones o enfermedades [dim](sep. con coma, ej: DT1, tendinitis)[/]",
+        default=current_injuries,
+    )
+    h["injuries"] = [i.strip() for i in injuries_str.split(",") if i.strip()]
+
+    notes = Prompt.ask(
+        "  Notas adicionales de salud [dim](opcional)[/]",
+        default=h.get("notes", ""),
+    )
+    h["notes"] = notes.strip()
+
+
+def _run_first_time_setup() -> None:
+    """
+    Solo se ejecuta la primera vez.
+    Pregunta objetivos + salud y marca el perfil como configurado.
+    """
+    profile = _load_user_profile()
+    p = profile.setdefault("personal", {})
+    name = p.get("name", "atleta")
+
+    console.print(Panel.fit(
+        f"[bold]Bienvenido, {name}![/] Primera vez configurando GarminCoach.\n"
+        "Necesito conocer tus objetivos y condiciones de salud\n"
+        "para personalizar todas las recomendaciones.\n"
+        "[dim]Pulsa Enter para omitir cualquier campo.[/]",
+        title="[bold green]GarminCoach — Configuración inicial[/]",
+        border_style="green",
+    ))
+
+    _ask_goals(profile)
+    _ask_health(profile)
+    profile["setup_complete"] = True
+    profile["garmin_user_id"] = _garmin_user_id()
+    _save_user_profile(profile)
+    console.print(f"\n[green]✓[/] ¡Todo listo, [bold]{name}[/]! Ya puedes empezar.\n")
+
+
+def _show_profile() -> None:
+    """Muestra el perfil actual del usuario."""
+    profile = _load_user_profile()
+    p = profile.get("personal", {})
+    g = profile.get("goals", {})
+    h = profile.get("health", {})
+
+    if not p.get("name"):
+        console.print("[yellow]Perfil vacío.[/] Usa [bold]/perfil editar objetivo[/] o [bold]/perfil editar salud[/].")
+        return
+
+    lines = [
+        f"[bold]Nombre:[/]          {p.get('name', '—')}",
+        f"[bold]Edad:[/]            {p.get('age', '—')} años",
+        f"[bold]Género:[/]          {p.get('gender', '—')}",
+        f"[bold]Peso:[/]            {p.get('weight_kg', '—')} kg",
+        f"[bold]Altura:[/]          {p.get('height_cm', '—')} cm",
+        "",
+        f"[bold]Deporte:[/]         {g.get('primary', '—')}",
+        f"[bold]Horas/semana:[/]    {g.get('weekly_training_hours', '—')}",
+        f"[bold]Evento objetivo:[/] {g.get('target_race', '—')}",
+        f"[bold]Fecha evento:[/]    {g.get('target_race_date', '—')}",
+        f"[bold]Tiempo objetivo:[/] {g.get('target_time', '—')}",
+    ]
+    injuries = h.get("injuries", [])
+    lines.append(f"[bold]Lesiones:[/]        {', '.join(injuries) if injuries else '—'}")
+    if h.get("notes"):
+        lines.append(f"[bold]Notas salud:[/]     {h['notes']}")
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold blue]Tu perfil[/]",
+        border_style="blue",
+    ))
+    console.print(
+        "[dim]Editar: "
+        "[bold]/perfil editar objetivo[/bold] — deporte, evento, tiempo objetivo • "
+        "[bold]/perfil editar salud[/bold] — lesiones y notas[/dim]"
+    )
 
 
 console = Console()
@@ -68,25 +270,91 @@ def _check_env(provider: str) -> None:
         sys.exit(1)
 
 
-def _ask_provider() -> str:
-    """Pregunta al usuario qué proveedor de IA usar y devuelve 'vpn', 'groq' o 'gemini'."""
+# Valores placeholder que indican que la clave no está configurada
+_PLACEHOLDER_VALUES = {"", "tu_clave_mistral", "tu_clave_gemini", "gsk_...", "AIzaSy_tu_clave_de_gemini", "ghp_..."}
+
+
+def _detect_zscaler() -> bool:
+    """
+    Detecta si el tráfico sale a través de Zscaler (red corporativa).
+    Hace una petición rápida a una API de IA externa; Zscaler devuelve
+    un 403 con su página HTML característica si la categoría está bloqueada.
+    Devuelve True si estamos detrás de Zscaler, False en caso contrario.
+    """
+    try:
+        with httpx.Client(timeout=4.0, follow_redirects=False) as client:
+            resp = client.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                headers={"x-goog-api-key": "probe"},
+            )
+            body = resp.text or ""
+            return "Zscaler" in body or "zscaler" in body.lower()
+    except Exception as e:
+        err = str(e)
+        return "Zscaler" in err or "zscaler" in err.lower()
+
+
+def _best_available_provider() -> str | None:
+    """
+    Devuelve el mejor proveedor configurado para uso fuera de VPN.
+    Prioridad: gemini → mistral → groq → cerebras.
+    """
+    candidates = [
+        ("gemini",   "GEMINI_API_KEY"),
+        ("mistral",  "MISTRAL_API_KEY"),
+        ("groq",     "GROQ_API_KEY"),
+        ("cerebras", "CEREBRAS_API_KEY"),
+    ]
+    for name, env_var in candidates:
+        val = os.environ.get(env_var, "")
+        if val and val not in _PLACEHOLDER_VALUES:
+            return name
+    return None
+
+
+def _auto_select_provider() -> str:
+    """
+    Detecta el entorno de red (VPN corporativa con Zscaler vs. acceso libre)
+    y selecciona automáticamente el proveedor LLM más adecuado.
+    - Con Zscaler → GitHub Models (acceso permitido por la VPN)
+    - Sin Zscaler → mejor proveedor configurado en .env (gemini, mistral, groq…)
+    """
+    console.print("[dim]Detectando entorno de red...[/]")
+    on_vpn = _detect_zscaler()
+
+    if on_vpn:
+        provider = "vpn"
+        token = os.environ.get("GITHUB_TOKEN", "")
+        if not token or token in _PLACEHOLDER_VALUES:
+            console.print(
+                "[bold red]Error:[/] Red corporativa (Zscaler) detectada, pero falta "
+                "[bold]GITHUB_TOKEN[/] en .env\n"
+                "Obtén un token gratuito en: https://github.com/settings/tokens"
+            )
+            sys.exit(1)
+        icon = "🏢"
+        env_desc = "Red corporativa [dim](Zscaler detectado)[/dim]"
+    else:
+        provider = _best_available_provider()
+        if provider is None:
+            console.print(
+                "[bold red]Error:[/] Sin VPN corporativa y sin ninguna API key configurada en .env\n"
+                "Configura al menos una de: [bold]GEMINI_API_KEY[/], [bold]MISTRAL_API_KEY[/], "
+                "[bold]GROQ_API_KEY[/]"
+            )
+            sys.exit(1)
+        icon = "🌐"
+        env_desc = "Sin VPN corporativa"
+
+    _, label, note = _PROVIDER_INFO[provider]
     console.print(Panel.fit(
-        "[bold]Selecciona el proveedor de IA:[/]\n\n"
-        "  [green]1[/green] · GitHub Models [dim](gpt-4o-mini)[/dim]           — dentro de VPN\n"
-        "  [yellow]2[/yellow] · Groq         [dim](llama-3.3-70b)[/dim]        — 100k tokens/día\n"
-        "  [cyan]3[/cyan] · Google Gemini [dim](gemini-2.0-flash)[/dim]     — ~1M tokens/día gratis\n"
-        "  [magenta]4[/magenta] · Mistral      [dim](mistral-small)[/dim]       — gratis · function calling nativo  [bold]← recomendado[/bold]\n"
-        "  [bright_cyan]5[/bright_cyan] · Cerebras     [dim](llama-3.3-70b)[/dim]       — ultrarrápido · gratis",
-        title="[bold blue]GarminCoach — Proveedor de IA[/]",
+        f"{icon}  {env_desc}\n"
+        f"[bold green]Proveedor seleccionado:[/] {label}\n"
+        f"[dim]{note}[/dim]",
+        title="[bold blue]GarminCoach — Entorno detectado[/]",
         border_style="blue",
     ))
-    choice = Prompt.ask(
-        "  Tu elección",
-        choices=["1", "2", "3", "4", "5"],
-        default="4",
-        case_sensitive=False,
-    )
-    return {"1": "vpn", "2": "groq", "3": "gemini", "4": "mistral", "5": "cerebras"}[choice]
+    return provider
 
 
 def _ask_tool_mode() -> bool:
@@ -108,7 +376,7 @@ def _ask_tool_mode() -> bool:
 
 
 async def main() -> None:
-    provider = _ask_provider()
+    provider = _auto_select_provider()
     _check_env(provider)
     essential_only = _ask_tool_mode()
 
@@ -126,6 +394,15 @@ async def main() -> None:
         console.print("[dim]Cargando herramientas de Garmin...[/]")
         await agent.initialize()
         console.print(f"[green]✓[/] {len(agent.tools_schema)} herramientas disponibles\n")
+
+        # Paso 1+2: siempre sincronizar datos personales desde Garmin
+        await _sync_from_garmin(agent)
+        agent.user_profile = _load_user_profile()
+
+        # Paso 3: solo la primera vez (o si cambió la cuenta de Garmin)
+        if _is_first_time():
+            _run_first_time_setup()
+            agent.user_profile = _load_user_profile()
         console.print("[dim dimgray][debug] Inicio de la sesión. Tokens gastados: 0[/]")
         if provider == "gemini":
             daily_info = agent.get_gemini_daily_info()
@@ -142,7 +419,7 @@ async def main() -> None:
                     f"Te quedan {daily_info['remaining']:,} tokens gratuitos hoy.[/]"
                 )
 
-        console.print(Rule("[dim]Escribe tu pregunta o 'salir' para terminar[/]"))
+        console.print(Rule("[dim]Escribe tu pregunta · [bold]/perfil[/bold] · [bold]/perfil editar objetivo[/bold] · [bold]/perfil editar salud[/bold] · [bold]salir[/bold][/]"))
 
         while True:
             try:
@@ -152,6 +429,38 @@ async def main() -> None:
 
             if user_input.strip().lower() in {"salir", "exit", "quit", "q"}:
                 break
+
+            # Comandos especiales
+            cmd = user_input.strip().lower()
+
+            if cmd in {"/perfil", "/profile"}:
+                _show_profile()
+                continue
+
+            if cmd in {"/perfil editar objetivo", "/perfil editar goal"}:
+                profile = _load_user_profile()
+                _ask_goals(profile)
+                _save_user_profile(profile)
+                agent.user_profile = _load_user_profile()
+                console.print("[green]✓[/] Objetivos actualizados.")
+                continue
+
+            if cmd in {"/perfil editar salud", "/perfil editar health"}:
+                profile = _load_user_profile()
+                _ask_health(profile)
+                _save_user_profile(profile)
+                agent.user_profile = _load_user_profile()
+                console.print("[green]✓[/] Datos de salud actualizados.")
+                continue
+
+            if cmd in {"/perfil editar", "/profile edit"}:
+                profile = _load_user_profile()
+                _ask_goals(profile)
+                _ask_health(profile)
+                _save_user_profile(profile)
+                agent.user_profile = _load_user_profile()
+                console.print("[green]✓[/] Perfil actualizado.")
+                continue
 
             if not user_input.strip():
                 continue

@@ -9,6 +9,12 @@ truststore>=0.9.0
 # MCP Python SDK (cliente para conectarse al servidor MCP de Garmin)
 mcp>=1.0.0
 
+# Servidor MCP de Garmin Connect (instalado localmente para evitar problemas SSL con uvx)
+garmin-mcp @ git+https://github.com/Taxuspt/garmin_mcp
+
+# uv / uvx — gestor de herramientas Python (fallback si garmin-mcp no está disponible)
+uv>=0.4.0
+
 # Variables de entorno
 python-dotenv>=1.0.0
 

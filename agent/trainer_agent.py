@@ -21,7 +21,10 @@ from agent.mcp_client import list_available_tools, call_tool
 
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
-MEMORY_DIR = Path(__file__).parent.parent / "memory"
+MEMORY_DIR  = Path(__file__).parent.parent / "memory"
+
+_PROFILE_FILE = MEMORY_DIR / "user_profile.json"    # datos personales, objetivos, salud
+_CONTEXT_FILE = MEMORY_DIR / "session_context.json"  # historial de mensajes y resúmenes
 
 
 def _load_system_prompt() -> str:
@@ -31,46 +34,54 @@ def _load_system_prompt() -> str:
 
 
 def _load_user_profile() -> dict:
-    """Carga el perfil del usuario desde memoria (si existe)."""
-    profile_file = MEMORY_DIR / "user_profile.json"
-    if profile_file.exists():
-        return json.loads(profile_file.read_text(encoding="utf-8"))
+    """Carga el perfil del usuario (datos personales, objetivos, salud)."""
+    if _PROFILE_FILE.exists():
+        return json.loads(_PROFILE_FILE.read_text(encoding="utf-8"))
     return {}
 
 
-def _save_history_entry(role: str, content: str) -> None:
-    """Guarda una entrada en el historial del perfil del usuario."""
+def _save_user_profile(profile: dict) -> None:
+    """Guarda el perfil del usuario en disco."""
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    profile_file = MEMORY_DIR / "user_profile.json"
-    profile = _load_user_profile()
-    profile.setdefault("history", []).append({"role": role, "content": content})
-    # Mantener solo las últimas 50 entradas
-    profile["history"] = profile["history"][-50:]
-    profile_file.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    _PROFILE_FILE.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_session_context() -> dict:
+    """Carga el contexto de sesiones (historial de mensajes y resúmenes)."""
+    if _CONTEXT_FILE.exists():
+        try:
+            return json.loads(_CONTEXT_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"history": [], "session_summaries": []}
+
+
+def _save_session_context(ctx: dict) -> None:
+    """Guarda el contexto de sesiones en disco."""
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    _CONTEXT_FILE.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _save_history_entry(role: str, content: str) -> None:
+    """Añade una entrada al historial de conversación persistente."""
+    ctx = _load_session_context()
+    ctx.setdefault("history", []).append({"role": role, "content": content})
+    ctx["history"] = ctx["history"][-50:]  # últimas 50 entradas
+    _save_session_context(ctx)
 
 
 def _load_session_summaries() -> list[dict]:
     """Carga los resúmenes de sesiones anteriores."""
-    profile_file = MEMORY_DIR / "user_profile.json"
-    if not profile_file.exists():
-        return []
-    try:
-        data = json.loads(profile_file.read_text(encoding="utf-8"))
-        return data.get("session_summaries", [])
-    except Exception:
-        return []
+    return _load_session_context().get("session_summaries", [])
 
 
 def _persist_session_summary(summary: str) -> None:
-    """Guarda el resumen de la sesión actual en memoria persistente."""
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    profile_file = MEMORY_DIR / "user_profile.json"
-    profile = _load_user_profile()
-    summaries = profile.get("session_summaries", [])
-    summaries.append({"date": date.today().isoformat(), "summary": summary})
-    # Mantener solo los últimos 10 resúmenes (≈10 semanas de uso)
-    profile["session_summaries"] = summaries[-10:]
-    profile_file.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Guarda el resumen de la sesión actual en el contexto persistente."""
+    ctx = _load_session_context()
+    summaries = ctx.get("session_summaries", [])
+    summaries.append({"date": date.today().isoformat(), "summary": summary[:600]})
+    ctx["session_summaries"] = summaries[-10:]  # últimos 10 resúmenes
+    _save_session_context(ctx)
 
 
 def _get_gemini_daily_file() -> Path:
@@ -763,18 +774,95 @@ class TrainerAgent:
         tools = await list_available_tools(self.mcp_session)
         self.tools_schema = _build_tools_schema(tools)
 
-        # Restaurar los últimos 6 mensajes del historial persistido (3 intercambios)
-        saved_history = self.user_profile.get("history", [])
-        for entry in saved_history[-6:]:
+        # Restaurar los últimos 6 mensajes del historial (de session_context.json)
+        ctx = _load_session_context()
+        for entry in ctx.get("history", [])[-6:]:
             role = entry.get("role")
             content = entry.get("content", "")
             if role in ("user", "assistant") and content:
                 self.conversation_history.append({"role": role, "content": content})
 
+    async def fetch_garmin_personal_data(self) -> dict:
+        """
+        Obtiene datos personales del usuario directamente desde Garmin Connect.
+        Estructura real de get_user_profile:
+          { "userData": { "gender", "weight"(g), "height"(cm), "birthDate" }, ... }
+        El nombre no está disponible en este endpoint.
+        """
+        result = {}
+        today = date.today().isoformat()
+
+        # --- get_user_profile ---
+        try:
+            raw = await call_tool(self.mcp_session, "get_user_profile", {})
+            data = json.loads(raw) if raw and raw.strip().startswith("{") else {}
+            if isinstance(data, dict):
+                ud = data.get("userData", {})
+
+                # Edad calculada desde birthDate (YYYY-MM-DD)
+                birth = ud.get("birthDate") or data.get("birthDate")
+                if birth:
+                    try:
+                        born = date.fromisoformat(str(birth))
+                        today_d = date.today()
+                        age = today_d.year - born.year - (
+                            (today_d.month, today_d.day) < (born.month, born.day)
+                        )
+                        if 5 < age < 120:
+                            result["age"] = age
+                    except (ValueError, TypeError):
+                        pass
+
+                # Género
+                gender = ud.get("gender") or data.get("gender", "")
+                if gender:
+                    result["gender"] = "hombre" if "MALE" in str(gender).upper() else "mujer"
+
+                # Altura en cm
+                height = ud.get("height") or data.get("height")
+                if height:
+                    try:
+                        h = float(height)
+                        if h > 50:
+                            result["height_cm"] = int(round(h))
+                    except (ValueError, TypeError):
+                        pass
+
+                # Peso: Garmin lo devuelve en gramos (ej: 67000.0 = 67 kg)
+                weight = ud.get("weight") or data.get("weight")
+                if weight:
+                    try:
+                        w = float(weight)
+                        result["weight_kg"] = round(w / 1000, 1) if w > 300 else round(w, 1)
+                    except (ValueError, TypeError):
+                        pass
+        except Exception:
+            pass
+
+        # --- get_body_composition (peso más reciente si get_user_profile no lo devolvió) ---
+        if "weight_kg" not in result:
+            try:
+                raw = await call_tool(self.mcp_session, "get_body_composition", {"date": today})
+                data = json.loads(raw) if raw and raw.strip().startswith(("{", "[")) else {}
+                if isinstance(data, list) and data:
+                    data = data[0]
+                if isinstance(data, dict):
+                    weight = data.get("weight") or data.get("weightKg") or data.get("value")
+                    if weight:
+                        try:
+                            w = float(weight)
+                            result["weight_kg"] = round(w / 1000, 1) if w > 300 else round(w, 1)
+                        except (ValueError, TypeError):
+                            pass
+            except Exception:
+                pass
+
+        return result
+
     def get_gemini_daily_info(self) -> dict:
         """Devuelve información sobre el uso diario de tokens de Gemini."""
         api_key = os.environ.get("GEMINI_API_KEY", "")
-        
+
         # Consultar si está marcada como agotada por cuota hoy
         is_exhausted = False
         file_path = _get_gemini_daily_file()
@@ -812,25 +900,36 @@ class TrainerAgent:
             f"NUNCA uses palabras como 'hoy', 'ayer', 'today', 'yesterday' ni caracteres de otros idiomas en parámetros de herramientas.\n"
         )
         profile_context = ""
-        if self.user_profile.get("personal", {}).get("name"):
-            p = self.user_profile["personal"]
-            g = self.user_profile.get("goals", {})
-            profile_context = (
-                f"\n\n## Perfil del usuario\n"
-                f"- Nombre: {p.get('name', '')}\n"
-                f"- Edad: {p.get('age', 'desconocida')}\n"
-                f"- Peso: {p.get('weight_kg', 'desconocido')} kg\n"
-                f"- Objetivo principal: {g.get('primary', 'no definido')}\n"
-                f"- Carrera objetivo: {g.get('target_race', 'ninguna')}\n"
-            )
+        p = self.user_profile.get("personal", {})
+        g = self.user_profile.get("goals", {})
+        h = self.user_profile.get("health", {})
+        if p.get("name"):
+            lines = [
+                f"- Nombre: {p.get('name', '')}",
+                f"- Edad: {p.get('age', 'desconocida')} años",
+            ]
+            if p.get("gender"):        lines.append(f"- Género: {p['gender']}")
+            if p.get("weight_kg"):     lines.append(f"- Peso: {p['weight_kg']} kg")
+            if p.get("height_cm"):     lines.append(f"- Altura: {p['height_cm']} cm")
+            if g.get("primary"):       lines.append(f"- Deporte principal: {g['primary']}")
+            if g.get("weekly_training_hours"): lines.append(f"- Horas de entrenamiento/semana: {g['weekly_training_hours']}")
+            if g.get("target_race"):   lines.append(f"- Carrera/evento objetivo: {g['target_race']}")
+            if g.get("target_race_date"): lines.append(f"- Fecha del evento: {g['target_race_date']}")
+            if g.get("target_time"):   lines.append(f"- Tiempo objetivo: {g['target_time']}")
+            injuries = h.get("injuries", [])
+            if injuries:               lines.append(f"- Lesiones/condiciones: {', '.join(injuries)}")
+            if h.get("notes"):         lines.append(f"- Notas de salud: {h['notes']}")
+            profile_context = "\n\n## Perfil del usuario\n" + "\n".join(lines) + "\n"
 
         # Incluir resúmenes de sesiones anteriores para memoria a largo plazo
         memory_context = ""
         summaries = _load_session_summaries()
         if summaries:
-            recent = summaries[-5:]  # últimas 5 sesiones
+            recent = summaries[-3:]  # últimas 3 sesiones
+            _MAX_SUMMARY = 350  # caracteres máximos por resumen
             lines = "\n".join(
-                f"- **{s['date']}**: {s['summary']}" for s in recent
+                f"- **{s['date']}**: {s['summary'][:_MAX_SUMMARY]}{'…' if len(s['summary']) > _MAX_SUMMARY else ''}"
+                for s in recent
             )
             memory_context = (
                 f"\n\n## Memoria de sesiones anteriores\n"

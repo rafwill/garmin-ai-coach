@@ -7,6 +7,7 @@ y expone sus herramientas para que el agente las use.
 import os
 import shutil
 from contextlib import asynccontextmanager
+from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -22,19 +23,26 @@ def _get_server_params(essential_only: bool = True) -> StdioServerParameters:
             "Copia .env.example a .env y rellena tus credenciales."
         )
 
-    # Localizar uvx (gestor de herramientas Python del proyecto uv)
-    uvx_cmd = shutil.which("uvx")
-    if not uvx_cmd:
-        raise RuntimeError(
-            "No se encontró 'uvx' en el PATH.\n"
-            "Insálalo con: pip install uv\n"
-            "o visita: https://docs.astral.sh/uv/getting-started/installation/"
-        )
+    # Localizar garmin-mcp instalado localmente (vía pip install garmin-mcp)
+    # o como fallback uvx (requiere descarga de Python 3.12, falla con Zscaler)
+    garmin_cmd = shutil.which("garmin-mcp")
+    use_uvx = False
+    if not garmin_cmd:
+        uvx_cmd = shutil.which("uvx")
+        if not uvx_cmd:
+            raise RuntimeError(
+                "No se encontró 'garmin-mcp' ni 'uvx' en el PATH.\n"
+                "Instala garmin-mcp con: pip install git+https://github.com/Taxuspt/garmin_mcp\n"
+                "o uvx con: pip install uv"
+            )
+        use_uvx = True
 
     # Herramientas esenciales para un agente entrenador personal.
     # Reduce el contexto de ~31k tokens (126 tools) a ~5k tokens (~25 tools).
     # Se puede sobreescribir con la variable GARMIN_ENABLED_TOOLS en .env.
     _DEFAULT_TOOLS = (
+        # Perfil personal del usuario
+        "get_user_profile,"
         # Actividades
         "get_activities,get_activity,"
         # Salud diaria (versiones ligeras donde existen)
@@ -60,18 +68,40 @@ def _get_server_params(essential_only: bool = True) -> StdioServerParameters:
     else:
         enabled_tools = os.environ.get("GARMIN_ENABLED_TOOLS", "")
 
-    return StdioServerParameters(
-        command=uvx_cmd,
-        args=[
+    if use_uvx:
+        command = uvx_cmd
+        args = [
             "--python", "3.12",
             "--from", "git+https://github.com/Taxuspt/garmin_mcp",
             "garmin-mcp",
-        ],
+        ]
+    else:
+        command = garmin_cmd
+        args = []
+
+    # Certificado SSL de Zscaler — necesario en redes con proxy SSL corporativo.
+    # Se exporta automáticamente desde el almacén de Windows con:
+    #   Get-ChildItem Cert:\LocalMachine\Root | Where Subject -match Zscaler
+    _project_root = Path(__file__).parent.parent
+    _zscaler_pem = _project_root / "zscaler-ca.pem"
+    ssl_overrides = {}
+    if _zscaler_pem.exists():
+        _pem_path = str(_zscaler_pem)
+        ssl_overrides = {
+            "REQUESTS_CA_BUNDLE": _pem_path,
+            "CURL_CA_BUNDLE": _pem_path,
+            "SSL_CERT_FILE": _pem_path,
+        }
+
+    return StdioServerParameters(
+        command=command,
+        args=args,
         env={
             **os.environ,
             "GARMIN_EMAIL": email,
             "GARMIN_PASSWORD": password,
             **({"GARMIN_ENABLED_TOOLS": enabled_tools} if enabled_tools else {}),
+            **ssl_overrides,
         },
     )
 

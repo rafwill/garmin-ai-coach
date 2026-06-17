@@ -68,3 +68,21 @@ Añadir tests unitarios para las funciones críticas:
 - Normalización de fechas (`_normalize_date_args`)
 - Compactación de resultados Garmin (`_compact_tool_result`)
 - Parseo de respuestas Gemini (`_GeminiCompletions._parse`)
+
+---
+
+## 🔓 8. Eliminar detección automática de Zscaler
+
+**Contexto:** Actualmente `agent/main.py` incluye `_detect_zscaler()` y `_auto_select_provider()` para
+funcionar desde el PC personal (sin VPN) y desde el portátil corporativo (con Zscaler).
+
+**Cuándo hacerlo:** Una vez aprobada en MyIT la solicitud de acceso a dominios de IA generativa,
+Zscaler dejará de bloquear las APIs externas desde la red corporativa.
+
+**Pasos:**
+1. Verificar que `generativelanguage.googleapis.com`, `api.mistral.ai`, etc. son accesibles desde VPN.
+2. Eliminar las funciones `_detect_zscaler()`, `_best_available_provider()` y `_auto_select_provider()`
+   de `agent/main.py`.
+3. Decidir un proveedor por defecto único (o restaurar la selección manual con `_ask_provider()`).
+4. Limpiar `_PLACEHOLDER_VALUES` si ya no se usa en otro lugar.
+5. El fichero `zscaler-ca.pem` de la raíz ya no será necesario (se puede añadir a `.gitignore`).
