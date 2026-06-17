@@ -134,8 +134,19 @@ def _validate_hours(value: str) -> tuple[bool, str]:
 
 
 def _ask_goals(profile: dict) -> None:
-    """Pregunta y guarda los campos de objetivos de entrenamiento."""
+    """Pregunta y guarda nombre + campos de objetivos de entrenamiento."""
+    p = profile.setdefault("personal", {})
     g = profile.setdefault("goals", {})
+
+    # Nombre — Garmin no lo expone en su API
+    console.print("\n[bold]Datos personales:[/]")
+    user_name = Prompt.ask(
+        "  Tu nombre [dim](ej: Rafael · Enter para omitir)[/]",
+        default=p.get("name", ""),
+    ).strip()
+    if user_name:
+        p["name"] = user_name
+
     console.print("\n[bold]Objetivos de entrenamiento:[/]")
 
     sport = Prompt.ask(
@@ -239,7 +250,8 @@ def _run_first_time_setup() -> None:
     profile["setup_complete"] = True
     profile["garmin_user_id"] = _garmin_user_id()
     _save_user_profile(profile)
-    console.print(f"\n[green]✓[/] ¡Todo listo, [bold]{name}[/]! Ya puedes empezar.\n")
+    final_name = profile.get("personal", {}).get("name") or name
+    console.print(f"\n[green]✓[/] ¡Todo listo, [bold]{final_name}[/]! Ya puedes empezar.\n")
 
 
 def _show_profile() -> None:
@@ -278,7 +290,7 @@ def _show_profile() -> None:
     ))
     console.print(
         "[dim]Editar: "
-        "[bold]/perfil editar objetivo[/bold] — deporte, evento, tiempo objetivo • "
+        "[bold]/perfil editar objetivo[/bold] — nombre, deporte, evento, tiempo objetivo • "
         "[bold]/perfil editar salud[/bold] — lesiones y notas[/dim]"
     )
 
