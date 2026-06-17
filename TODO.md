@@ -1,10 +1,25 @@
 # TODO — Mejoras futuras de GarminCoach
 
+---
+
+## ✅ Completado
+
+| # | Tarea |
+|---|---|
+| 2 | **Perfil de usuario enriquecido** — sync automático desde Garmin, setup inicial de objetivos/salud, comandos `/perfil`, `/perfil editar objetivo`, `/perfil editar salud` |
+| — | **Separación de memoria** — `user_profile.json` (perfil) y `session_context.json` (historial + resúmenes) |
+| — | **SSL / Zscaler** — fix para garmin-mcp (zscaler-ca.pem) y LLM clients (truststore) |
+| — | **Auto-detección de red** — `_detect_zscaler()` selecciona GitHub Models (VPN) o mejor proveedor libre |
+| — | **Límite de iteraciones** — `_MAX_TOOL_ITER=15` en `chat()` para evitar bucle infinito |
+| — | **system_prompt.md reescrito** — herramientas reales del MCP, protocolos DT1, protocolos de análisis correctos |
+| — | **`activityId` fuera del strip set** — el LLM puede encadenar `get_activities → get_activity` |
+| — | **Creación automática de `memory/`** — `MEMORY_DIR.mkdir()` al importar el módulo |
+
+---
+
 ## 🗄️ 1. Migrar almacenamiento de disco a base de datos
 
-**Problema actual:** La memoria del agente (historial, resúmenes de sesión, perfil de usuario) se guarda en `memory/user_profile.json`. Esto escala mal, no permite consultas, y no es apto para múltiples usuarios o acceso remoto.
-
-**Solución propuesta:** Sustituir el JSON en disco por una base de datos. Dos opciones:
+**Problema actual:** La memoria del agente (historial, resúmenes de sesión, perfil de usuario) se guarda en ficheros JSON locales. No escala, no permite consultas, y no es apto para acceso desde múltiples dispositivos.
 
 ### Opción A — SQLite (local, sin infraestructura)
 - Cero dependencias externas, fichero único `.db` en disco
@@ -12,77 +27,105 @@
 - Librería: `aiosqlite` (async) o `sqlite3` (stdlib)
 - Tablas sugeridas: `sessions`, `session_summaries`, `user_profile`, `history`
 
-### Opción B — Supabase (cloud, multiusuario)
+### Opción B — Supabase (cloud, multiusuario) ← recomendado para multi-dispositivo
 - PostgreSQL gestionado con API REST y SDK Python (`supabase-py`)
 - Permite acceder al historial desde cualquier dispositivo
 - Capa gratuita: 500 MB de base de datos, 2 GB de storage
 - Registro: https://supabase.com → nuevo proyecto → obtener `SUPABASE_URL` y `SUPABASE_ANON_KEY`
-- Variables de entorno a añadir al `.env`:
+- Variables a añadir al `.env`:
   ```
   SUPABASE_URL=https://xxxx.supabase.co
   SUPABASE_ANON_KEY=eyJ...
   ```
 
 **Ficheros afectados:**
-- `agent/trainer_agent.py` — funciones `_load_user_profile`, `_save_history_entry`, `_persist_session_summary`, `_load_session_summaries`
-- `agent/trainer_agent.py` — `_get_gemini_daily_file`, `update_gemini_daily_usage`, `mark_gemini_quota_exhausted`
+- `agent/trainer_agent.py` — `_load_user_profile`, `_save_user_profile`, `_load_session_context`, `_save_session_context`, `_persist_session_summary`, `_load_session_summaries`, `update_gemini_daily_usage`, `mark_gemini_quota_exhausted`
 - `requirements.txt` — añadir `aiosqlite` o `supabase`
-
----
-
-## 🧠 2. Perfil de usuario enriquecido
-
-Permitir al agente preguntar y persistir datos personales del usuario (nombre, edad, peso, objetivos, carreras objetivo, historial de lesiones) para personalizar las recomendaciones sin repetir la misma información en cada sesión.
 
 ---
 
 ## 📊 3. Dashboard web de métricas
 
-Visualización de tendencias (HRV, VO₂max, sueño, estrés) en una interfaz web sencilla. Opciones: Streamlit, Gradio, o panel estático con Chart.js.
+Visualización de tendencias (HRV, VO₂max, sueño, estrés) en una interfaz web sencilla.
+- Opciones: **Streamlit** (más rápido), Gradio, o panel estático con Chart.js
+- Datos fuente: `session_context.json` + llamadas directas al MCP
+- Podría correr como proceso paralelo junto al agente de terminal
 
 ---
 
 ## 🔔 4. Notificaciones / resumen diario automático
 
-Ejecutar el agente en modo automático cada mañana (tarea programada) para generar un resumen del día anterior y enviarlo por email o Telegram.
-
----
-
-## 🔄 5. Sincronización multi-dispositivo
-
-Si se migra a Supabase (punto 1B), el historial y los resúmenes estarían disponibles desde el móvil, tablet o cualquier PC sin configuración adicional.
+Ejecutar el agente en modo automático cada mañana (tarea programada) para:
+- Obtener estado del día (readiness, body battery, sueño)
+- Generar resumen del entrenamiento del día anterior
+- Enviar por **Telegram** (bot API, gratuito) o email (SMTP)
+- En Windows: tarea programada con el Programador de tareas o `schtasks`
 
 ---
 
 ## 🤖 6. Soporte para más proveedores LLM
 
-- **OpenAI** (gpt-4o) — para usuarios con cuenta de pago
-- **Ollama** (modelos locales: llama3, mistral) — sin conexión a internet ni coste
-- **Anthropic Claude** — excelente para análisis largos
+- **OpenAI** (`gpt-4o`) — para usuarios con cuenta de pago
+- **Ollama** (modelos locales: llama3, mistral) — sin conexión a internet ni coste, ideal para datos sensibles
+- **Anthropic Claude** — excelente para análisis largos y razonamiento médico
 
 ---
 
 ## 🧪 7. Tests automatizados
 
 Añadir tests unitarios para las funciones críticas:
-- Normalización de fechas (`_normalize_date_args`)
-- Compactación de resultados Garmin (`_compact_tool_result`)
-- Parseo de respuestas Gemini (`_GeminiCompletions._parse`)
+- `_normalize_date_args` — normalización de fechas ("hoy", "ayer" → ISO)
+- `_compact_tool_result` — compactación y truncado de resultados Garmin
+- `_compact_personal_records` — conversión de segundos a HH:MM:SS
+- `_GeminiCompletions._parse` — parseo de respuestas y tool calls de Gemini
+- `_strip_garmin_object` — filtrado de campos sin valor analítico
+- `_is_first_time` / `_garmin_user_id` — lógica de detección de primera sesión
 
 ---
 
 ## 🔓 8. Eliminar detección automática de Zscaler
 
-**Contexto:** Actualmente `agent/main.py` incluye `_detect_zscaler()` y `_auto_select_provider()` para
-funcionar desde el PC personal (sin VPN) y desde el portátil corporativo (con Zscaler).
-
-**Cuándo hacerlo:** Una vez aprobada en MyIT la solicitud de acceso a dominios de IA generativa,
-Zscaler dejará de bloquear las APIs externas desde la red corporativa.
+**Cuándo:** Una vez aprobada en MyIT la solicitud de acceso a dominios de IA generativa.
 
 **Pasos:**
 1. Verificar que `generativelanguage.googleapis.com`, `api.mistral.ai`, etc. son accesibles desde VPN.
-2. Eliminar las funciones `_detect_zscaler()`, `_best_available_provider()` y `_auto_select_provider()`
-   de `agent/main.py`.
-3. Decidir un proveedor por defecto único (o restaurar la selección manual con `_ask_provider()`).
+2. Eliminar `_detect_zscaler()`, `_best_available_provider()` y `_auto_select_provider()` de `agent/main.py`.
+3. Decidir proveedor por defecto único o restaurar selección manual con `_ask_provider()`.
 4. Limpiar `_PLACEHOLDER_VALUES` si ya no se usa en otro lugar.
-5. El fichero `zscaler-ca.pem` de la raíz ya no será necesario (se puede añadir a `.gitignore`).
+5. `zscaler-ca.pem` ya no necesario (añadir a `.gitignore`).
+
+---
+
+## 🖨️ 9. Eliminar mensajes de debug en producción
+
+Los `print(f"  [debug] ...")` en `trainer_agent.py` y `main.py` son útiles en desarrollo pero ensucian la interfaz.
+
+**Opciones:**
+- Variable de entorno `DEBUG=1` para activarlos selectivamente
+- Usar el módulo `logging` con nivel configurable (`logging.DEBUG` / `logging.INFO`)
+- Ficheros afectados: `agent/trainer_agent.py` (chat loop), `agent/main.py` (tokens de sesión)
+
+---
+
+## 📅 10. Validación de inputs del setup inicial
+
+Actualmente `_ask_goals` acepta cualquier string en los campos de fecha y tiempo sin validar:
+- `target_race_date` — debería validar formato `YYYY-MM-DD` y que sea fecha futura
+- `target_time` — debería validar formato `H:MM:SS` o `HH:MM:SS`
+- `weekly_training_hours` — ya se valida el tipo float, pero no el rango razonable (0–40 h)
+
+---
+
+## 💬 11. Comando `/ayuda` en el chat
+
+Añadir al loop de conversación el comando `/ayuda` que muestre un listado de:
+- Qué puede hacer el agente (ejemplos de preguntas)
+- Comandos disponibles (`/perfil`, `/perfil editar...`, `salir`)
+- Cómo interpretar los indicadores de Garmin (body battery, readiness, HRV)
+
+---
+
+## 📈 12. Historial de evolución de peso
+
+Aprovechar `get_body_composition` para guardar localmente el peso de cada sesión y mostrar la evolución con el comando `/peso` o al pedir análisis de composición corporal. Especialmente útil en DT1 donde el peso fluctúa con la glucemia.
+
