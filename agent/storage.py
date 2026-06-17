@@ -57,6 +57,11 @@ def _supabase():
         return None
 
     try:
+        import truststore
+        truststore.inject_into_ssl()
+    except Exception:
+        pass
+    try:
         from supabase import create_client
         _sb = create_client(url, key)
         log.info("[storage] Supabase conectado: %s", url)

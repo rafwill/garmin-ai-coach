@@ -21,7 +21,7 @@ from rich.prompt import Prompt
 from rich.rule import Rule
 
 # Cargar variables de entorno desde .env
-load_dotenv()
+load_dotenv(encoding="utf-8")
 
 # Parchear SSL para usar el almacén de certificados del sistema (necesario con Zscaler)
 try:
