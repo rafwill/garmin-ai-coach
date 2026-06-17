@@ -25,9 +25,15 @@ PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 MEMORY_DIR  = Path(__file__).parent.parent / "memory"  # mantenido por compatibilidad
 
 
-def _load_system_prompt() -> str:
-    """Carga el system prompt del entrenador desde el archivo Markdown."""
-    prompt_file = PROMPTS_DIR / "system_prompt.md"
+def _load_system_prompt(compact: bool = False) -> str:
+    """Carga el system prompt del entrenador desde el archivo Markdown.
+
+    Args:
+        compact: Si True, carga la versión compacta (para modelos con limite bajo
+                 de tokens, como GitHub Models en red corporativa con Zscaler).
+    """
+    filename = "system_prompt_compact.md" if compact else "system_prompt.md"
+    prompt_file = PROMPTS_DIR / filename
     return prompt_file.read_text(encoding="utf-8")
 
 
@@ -625,7 +631,9 @@ class TrainerAgent:
         else:
             raise ValueError(f"Proveedor desconocido: '{provider}'. Opciones válidas: 'vpn', 'groq', 'gemini', 'mistral', 'cerebras'.")
         self.mcp_session = mcp_session
-        self.system_prompt = _load_system_prompt()
+        # GitHub Models (vpn) tiene limite de ~8000 tokens en el request;
+        # usamos el prompt compacto para dejar espacio a tools + contexto.
+        self.system_prompt = _load_system_prompt(compact=(provider == "vpn"))
         self.user_profile = _load_user_profile()
         self.conversation_history: list[dict] = []
         self.tools_schema: list[dict] = []
@@ -819,12 +827,29 @@ class TrainerAgent:
                 _save_history_entry("user", user_message)
                 _save_history_entry("assistant", assistant_reply)
                 return assistant_reply
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=self.tools_schema if self.tools_schema else None,
-                tool_choice="auto" if self.tools_schema else None,
-            )
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=self.tools_schema if self.tools_schema else None,
+                    tool_choice="auto" if self.tools_schema else None,
+                )
+            except Exception as api_exc:
+                err_str = str(api_exc)
+                if "413" in err_str or "tokens_limit_reached" in err_str or "Request body too large" in err_str:
+                    msg = (
+                        "La consulta es demasiado extensa para el modelo actual (límite de tokens del proveedor).\n\n"
+                        "Prueba con una de estas opciones:\n"
+                        "- Haz una pregunta más específica y acotada (ej: *¿Cómo estoy hoy?* en lugar de *analiza 8 semanas*)\n"
+                        "- Divide el análisis en pasos: primero métricas de hoy, luego tendencias, luego plan\n"
+                        "- Si no estás en red corporativa, reinicia el agente (usará Gemini con contexto ilimitado)"
+                    )
+                    self.conversation_history.append({"role": "user", "content": user_message})
+                    self.conversation_history.append({"role": "assistant", "content": msg})
+                    _save_history_entry("user", user_message)
+                    _save_history_entry("assistant", msg)
+                    return msg
+                raise
 
             # Track and log token usage
             if getattr(response, "usage", None):
