@@ -24,6 +24,8 @@ import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import httpx
+
 log = logging.getLogger(__name__)
 
 # ─── Rutas de ficheros locales ────────────────────────────────────────────────
@@ -34,6 +36,46 @@ _CONTEXT_FILE = _MEMORY_DIR / "session_context.json"
 _GEMINI_FILE  = _MEMORY_DIR / "gemini_daily_usage.json"
 
 _MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ─── Detección de Zscaler (proxy SSL corporativo) ────────────────────────────
+
+_zscaler_cache: bool | None = None  # None = no comprobado todavía
+
+
+def is_zscaler_network() -> bool:
+    """
+    Detecta si el tráfico sale a través de Zscaler (proxy SSL corporativo).
+    Dos firmas posibles:
+      1. Zscaler bloquea la URL → respuesta 4xx con "Zscaler" en el cuerpo HTML.
+      2. Zscaler intercepta SSL sin bloquear → error "CERTIFICATE_VERIFY_FAILED"
+         porque inyecta su propio certificado raíz (no confiado por Python).
+    El resultado se cachea para no repetir la sonda en cada llamada.
+    """
+    global _zscaler_cache
+    if _zscaler_cache is not None:
+        return _zscaler_cache
+    try:
+        with httpx.Client(timeout=4.0, follow_redirects=False, verify=True) as client:
+            resp = client.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                headers={"x-goog-api-key": "probe"},
+            )
+            body = resp.text or ""
+            _zscaler_cache = "Zscaler" in body or "zscaler" in body.lower()
+    except Exception as e:
+        err = str(e)
+        # Firma 1: nombre de Zscaler en el mensaje de error
+        # Firma 2: Python no puede verificar el certificado porque Zscaler
+        #          inyecta su propia CA raíz (no instalada en el bundle de Python)
+        _zscaler_cache = (
+            "Zscaler" in err
+            or "zscaler" in err.lower()
+            or "CERTIFICATE_VERIFY_FAILED" in err
+            or "unable to get local issuer certificate" in err
+        )
+    log.debug("[storage] Zscaler detectado: %s", _zscaler_cache)
+    return _zscaler_cache
 
 
 # ─── Cliente Supabase (singleton, inicialización lazy) ───────────────────────
@@ -57,11 +99,12 @@ def _supabase():
         return None
 
     try:
-        import truststore
-        truststore.inject_into_ssl()
-    except Exception:
-        pass
-    try:
+        if is_zscaler_network():
+            # Zscaler intercepta el SSL corporativo — usar el almacén de
+            # certificados del sistema (truststore) para que httpx confíe
+            import truststore
+            truststore.inject_into_ssl()
+            log.debug("[storage] Supabase: truststore activado (Zscaler detectado)")
         from supabase import create_client
         _sb = create_client(url, key)
         log.info("[storage] Supabase conectado: %s", url)

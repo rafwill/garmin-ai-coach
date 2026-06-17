@@ -360,24 +360,14 @@ def _check_env(provider: str) -> None:
 _PLACEHOLDER_VALUES = {"", "tu_clave_mistral", "tu_clave_gemini", "gsk_...", "AIzaSy_tu_clave_de_gemini", "ghp_..."}
 
 
-def _detect_zscaler() -> bool:
+def _detect_zscaler() -> bool:  # noqa: F811  (sobrescribe el import con la misma semántica)
     """
     Detecta si el tráfico sale a través de Zscaler (red corporativa).
-    Hace una petición rápida a una API de IA externa; Zscaler devuelve
-    un 403 con su página HTML característica si la categoría está bloqueada.
-    Devuelve True si estamos detrás de Zscaler, False en caso contrario.
+    Delegado a agent.storage.is_zscaler_network() para mantener la lógica
+    en un único lugar y reutilizar la caché entre módulos.
     """
-    try:
-        with httpx.Client(timeout=4.0, follow_redirects=False) as client:
-            resp = client.get(
-                "https://generativelanguage.googleapis.com/v1beta/models",
-                headers={"x-goog-api-key": "probe"},
-            )
-            body = resp.text or ""
-            return "Zscaler" in body or "zscaler" in body.lower()
-    except Exception as e:
-        err = str(e)
-        return "Zscaler" in err or "zscaler" in err.lower()
+    from agent.storage import is_zscaler_network
+    return is_zscaler_network()
 
 
 def _best_available_provider() -> str | None:
