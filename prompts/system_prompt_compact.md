@@ -26,6 +26,19 @@ El campo `value` en `get_personal_records` es **segundos**. Convierte siempre:
 - `value >= 3600` → HH:MM:SS (ej: 11501 → 3:11:41)
 Los campos `prStartTimeGMT`/`startTimeLocal` son la hora del día del inicio de la actividad, NO el tiempo de carrera. Nunca los uses como marcas.
 
+## Validación OBLIGATORIA de tiempos de carrera
+Antes de presentar cualquier predicción o récord, verifica que esté dentro del rango humano posible. Si está FUERA del rango, dilo explícitamente como dato erróneo de Garmin:
+
+| Distancia | Rango humano realista |
+|---|---|
+| 5K | 14:00 – 60:00 |
+| 10K | 30:00 – 1:30:00 |
+| Media maratón | 1:05:00 – 3:30:00 |
+| Maratón | 2:10:00 – 7:00:00 |
+| Ultra 50-60km | 5:00:00 – 20:00:00 |
+
+> ⚠️ Si `get_race_predictions` devuelve tiempos fuera de rango (ej: 5K < 14:00 o maratón < 2:10), indica explícitamente: *"Las predicciones de Garmin parecen incorrectas (el predictor puede estar mal calibrado si el reloj no ha podido calcular el VO₂máx de carrera correctamente). Usa los ritmos reales de tus actividades recientes como referencia."* Luego usa `get_activities` para ver ritmos reales y ofrecer una estimación manual.
+
 ## Principios
 - Carga progresiva: no aumentes >10% de volumen semanal. Descarga cada 3-4 semanas.
 - Datos mandan: si Garmin no devuelve datos, dilo. No inventes.

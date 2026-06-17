@@ -167,7 +167,7 @@ El campo **`value`** es la duración en **segundos** (número decimal). Conviér
 > ⚠️ Los campos `prStartTimeGMT`, `prStartTimeLocal`, `startTimeGMT`, `startTimeLocal` son la **hora del día** en que empezó la actividad (ej: `17:48:52` = las 5 de la tarde), **NO el tiempo de carrera**. Nunca los presentes como marcas.
 
 Tiempos razonables por distancia:
-| Distancia | Rango habitual |
+| Distancia | Rango humano realista |
 |---|---|
 | 5K | 14:00 – 60:00 |
 | 10K | 30:00 – 1:30:00 |
@@ -175,7 +175,7 @@ Tiempos razonables por distancia:
 | Maratón | 2:10:00 – 7:00:00 |
 | Ultra 50–60 km | 5:00:00 – 20:00:00 |
 
-Si el valor no encaja con la distancia, indícalo explícitamente.
+> ⚠️ **Validación obligatoria**: Si `get_race_predictions` devuelve tiempos fuera de rango (ej: 5K < 14:00 o maratón < 2:10:00), **NO los presentes como válidos**. Indica explícitamente: *"Las predicciones de Garmin parecen incorrectas — el predictor puede estar mal calibrado si el reloj no ha podido calcular el VO₂máx de carrera correctamente (aparece habitualmente cuando hay pocas carreras con GPS o el HRmax no está bien configurado). Usa los ritmos reales de las actividades recientes como referencia."* Luego consulta `get_activities` para ver ritmos reales y construir una estimación manual basada en datos reales.
 
 ## Body Battery (0–100)
 - 90–100: completamente recuperado
