@@ -327,6 +327,117 @@ def is_gemini_quota_exhausted(api_key: str) -> bool:
     return bool(day_data.get("quota_exhausted", False)) if isinstance(day_data, dict) else False
 
 
+def check_supabase_connection() -> dict:
+    """
+    Comprueba la conectividad con Supabase haciendo una query real.
+    Resetea el singleton para forzar un intento limpio.
+
+    Returns:
+        {
+            "configured": bool,   # URL + KEY presentes y no son placeholders
+            "connected":  bool,   # query de ping OK
+            "error":      str|None,
+        }
+    """
+    global _sb, _sb_ready
+
+    url = os.environ.get("SUPABASE_URL", "").strip()
+    key = os.environ.get("SUPABASE_ANON_KEY", "").strip()
+
+    if not url or not key or "xxx" in url or url.endswith(".supabase.co") is False:
+        return {"configured": False, "connected": False, "error": None}
+
+    # Forzar nuevo intento de conexión
+    _sb_ready = False
+    _sb       = None
+    sb        = _supabase()
+
+    if sb is None:
+        return {"configured": True, "connected": False, "error": "No se pudo crear el cliente Supabase"}
+
+    try:
+        sb.table("user_profile").select("garmin_user_id").limit(1).execute()
+        return {"configured": True, "connected": True, "error": None}
+    except Exception as exc:
+        err = str(exc)
+        return {"configured": True, "connected": False, "error": err}
+
+
+def migrate_local_to_supabase() -> dict:
+    """
+    Migra los datos de los ficheros JSON locales a Supabase si:
+      - Supabase está configurado y accesible.
+      - La tabla destino está vacía para este usuario (evita sobreescribir).
+
+    Returns:
+        {"profile": bool, "context": bool, "gemini": bool}
+        True = se migró ese tipo de dato, False = no era necesario o falló.
+    """
+    result = {"profile": False, "context": False, "gemini": False}
+    sb = _supabase()
+    if not sb:
+        return result
+
+    uid = _garmin_uid()
+
+    # ── Perfil ──────────────────────────────────────────────────────────────
+    try:
+        existing = sb.table("user_profile").select("garmin_user_id").eq("garmin_user_id", uid).execute()
+        if not existing.data and _PROFILE_FILE.exists():
+            local_profile = _read_json(_PROFILE_FILE, {})
+            if local_profile:
+                sb.table("user_profile").upsert({
+                    "garmin_user_id": uid,
+                    "data":           local_profile,
+                }).execute()
+                result["profile"] = True
+    except Exception as exc:
+        log.warning("[storage] migrate profile error: %s", exc)
+
+    # ── Contexto de sesión ───────────────────────────────────────────────────
+    try:
+        existing = sb.table("session_context").select("garmin_user_id").eq("garmin_user_id", uid).execute()
+        if not existing.data and _CONTEXT_FILE.exists():
+            local_ctx = _read_json(_CONTEXT_FILE, {})
+            if local_ctx.get("history") or local_ctx.get("session_summaries"):
+                sb.table("session_context").upsert({
+                    "garmin_user_id":    uid,
+                    "history":           local_ctx.get("history", []),
+                    "session_summaries": local_ctx.get("session_summaries", []),
+                }).execute()
+                result["context"] = True
+    except Exception as exc:
+        log.warning("[storage] migrate context error: %s", exc)
+
+    # ── Uso de Gemini ────────────────────────────────────────────────────────
+    try:
+        if _GEMINI_FILE.exists():
+            local_gemini = _read_json(_GEMINI_FILE, {})
+            today = date.today().isoformat()
+            for kh, days in local_gemini.items():
+                if today in days:
+                    day_data = days[today]
+                    tokens   = day_data.get("tokens", 0) if isinstance(day_data, dict) else int(day_data)
+                    if tokens > 0:
+                        existing = sb.table("gemini_usage") \
+                                     .select("key_hash") \
+                                     .eq("key_hash", kh) \
+                                     .eq("usage_date", today) \
+                                     .execute()
+                        if not existing.data:
+                            sb.table("gemini_usage").upsert({
+                                "key_hash":        kh,
+                                "usage_date":      today,
+                                "tokens":          tokens,
+                                "quota_exhausted": day_data.get("quota_exhausted", False) if isinstance(day_data, dict) else False,
+                            }).execute()
+                            result["gemini"] = True
+    except Exception as exc:
+        log.warning("[storage] migrate gemini error: %s", exc)
+
+    return result
+
+
 def _update_gemini_file(api_key: str, tokens: int, quota_exhausted: bool) -> None:
     """Actualiza el fichero local de uso de Gemini."""
     kh        = _key_hash(api_key)

@@ -96,3 +96,29 @@ Los `print(f"  [debug] ...")` en `trainer_agent.py` y `main.py` son útiles en d
 
 Aprovechar `get_body_composition` para guardar localmente el peso de cada sesión y mostrar la evolución con el comando `/peso` o al pedir análisis de composición corporal. Especialmente útil en DT1 donde el peso fluctúa con la glucemia.
 
+---
+
+## 🗃️ 13. Modelado completo de la base de datos
+
+**Objetivo:** Supabase como fuente de verdad. Los ficheros JSON locales pasan a ser caché de solo lectura (datos actuales de sesión), no almacenamiento primario.
+
+**Qué hay que modelar/migrar a Supabase:**
+- **Credenciales ofuscadas** — email Garmin (hash), tokens OAuth Garmin (`~/.garminconnect`) con cifrado en reposo
+- **Secrets/API keys** — claves LLM hasheadas o cifradas (ahora solo están en `.env` local)
+- **Perfil completo del usuario** — ya en `user_profile` ✅, revisar si falta algún campo
+- **Historial de sesiones** — ya en `session_context` ✅, valorar particionar por fecha para no crecer sin límite
+- **Uso de tokens por proveedor** — ahora solo se trackea Gemini; añadir Mistral, Groq, Cerebras
+- **Historial de actividades cacheado** — evitar re-pedir a Garmin datos que no cambian (actividades pasadas)
+
+**Modelo de caché local propuesto:**
+- Solo persisten en JSON los datos de la sesión activa (perfil cargado al arrancar, historial de los últimos N mensajes)
+- Al arrancar: cargar desde Supabase → escribir caché local
+- Al guardar: escribir en Supabase primero → actualizar caché local
+- Sin Supabase: comportamiento actual (JSON como fuente de verdad)
+
+**Consideraciones de seguridad:**
+- Nunca almacenar contraseñas en claro (ni local ni en BD)
+- Tokens OAuth: cifrar con clave derivada del email (AES-256 o Fernet)
+- API keys LLM: valorar guardar solo el hash para tracking de cuota, nunca el valor real en BD
+- Row Level Security (RLS) de Supabase para aislar datos por `garmin_user_id`
+

@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent.mcp_client import garmin_mcp_session
 from agent.trainer_agent import TrainerAgent, _load_user_profile, _save_user_profile
+from agent.storage import check_supabase_connection, migrate_local_to_supabase
 
 
 def _garmin_user_id() -> str:
@@ -386,7 +387,10 @@ def _best_available_provider() -> str | None:
     """
     Devuelve el mejor proveedor configurado para uso fuera de VPN.
     Prioridad: gemini → mistral → groq → cerebras.
+    Gemini se salta si la cuota diaria está marcada como agotada.
     """
+    from agent.storage import is_gemini_quota_exhausted
+
     candidates = [
         ("gemini",   "GEMINI_API_KEY"),
         ("mistral",  "MISTRAL_API_KEY"),
@@ -396,6 +400,11 @@ def _best_available_provider() -> str | None:
     for name, env_var in candidates:
         val = os.environ.get(env_var, "")
         if val and val not in _PLACEHOLDER_VALUES:
+            if name == "gemini" and is_gemini_quota_exhausted(val):
+                console.print(
+                    "[dim yellow]Gemini: cuota agotada, probando siguiente proveedor...[/]"
+                )
+                continue
             return name
     return None
 
@@ -478,6 +487,34 @@ def _ask_tool_mode(provider: str) -> bool:
     return choice == "1"
 
 
+def _check_and_migrate_supabase() -> None:
+    """
+    Comprueba la conectividad con Supabase al arrancar y muestra el estado.
+    Si Supabase acaba de conectarse y hay datos locales, los migra automáticamente.
+    """
+    status = check_supabase_connection()
+
+    if not status["configured"]:
+        return  # Supabase no configurado, modo solo-ficheros silencioso
+
+    if status["connected"]:
+        # Intentar migrar datos locales (solo mueve si la tabla está vacía para este usuario)
+        migrated = migrate_local_to_supabase()
+        migrated_items = [k for k, v in migrated.items() if v]
+        if migrated_items:
+            labels = {"profile": "perfil", "context": "historial de sesiones", "gemini": "uso de Gemini"}
+            items_str = ", ".join(labels[i] for i in migrated_items)
+            console.print(f"[green]✓[/] Supabase — datos migrados desde ficheros locales: [dim]{items_str}[/]")
+        else:
+            console.print("[green]✓[/] Supabase conectado — memoria guardada en la nube")
+    else:
+        console.print(
+            f"[bold yellow]⚠[/] Supabase configurado pero no accesible — "
+            f"datos guardados solo en ficheros locales\n"
+            f"  [dim]Error: {status['error']}[/]"
+        )
+
+
 async def main() -> None:
     provider = _auto_select_provider()
     _check_env(provider)
@@ -497,6 +534,9 @@ async def main() -> None:
         console.print("[dim]Cargando herramientas de Garmin...[/]")
         await agent.initialize()
         console.print(f"[green]✓[/] {len(agent.tools_schema)} herramientas disponibles\n")
+
+        # Comprobar conectividad con Supabase y migrar datos locales si procede
+        _check_and_migrate_supabase()
 
         # Paso 1: comprobar cambio de cuenta ANTES de que sync sobreescriba garmin_user_id
         is_first = _is_first_time()
