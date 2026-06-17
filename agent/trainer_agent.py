@@ -222,8 +222,8 @@ _GARMIN_STRIP_FIELDS = {
     "prStartTimeGMT", "prStartTimeLocal",
     "startTimeGMT", "startTimeLocal", "startTimeUTC",
     "beginTimestamp", "calendarDate",
-    # IDs y referencias internas
-    "id", "activityId", "userProfileId", "ownerId", "deviceId",
+    # IDs y referencias internas (NO incluir activityId: el LLM lo necesita para llamar get_activity)
+    "id", "userProfileId", "ownerId", "deviceId",
     "garminGUID", "uuid", "userId",
     # Metadatos de presentación sin valor para el análisis
     "displayName", "locationName", "countryCode", "timeZoneId",
@@ -586,7 +586,9 @@ class _GeminiCompletions:
                 err_msg = str(e)
                 
                 # Detectar limite de cuota de la cuenta/API key (RESOURCE_EXHAUSTED / quota exceeded)
-                is_quota_exhausted = "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower() or "limit" in err_msg.lower()
+                is_quota_exhausted = "RESOURCE_EXHAUSTED" in err_msg or (
+                    "quota" in err_msg.lower() and "rate" not in err_msg.lower()
+                )
                 if is_quota_exhausted:
                     # Guardar que la clave se ha quedado sin cuota hoy para mostrarlo coherentemente al inicio
                     mark_gemini_quota_exhausted(self._api_key)

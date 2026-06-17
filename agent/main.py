@@ -6,7 +6,6 @@ Interfaz de conversación en terminal.
 
 import asyncio
 import hashlib
-import json
 import os
 import sys
 from pathlib import Path
@@ -34,9 +33,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent.mcp_client import garmin_mcp_session
 from agent.trainer_agent import TrainerAgent, _load_user_profile, _save_user_profile
-
-
-_MEMORY_DIR = Path(__file__).parent.parent / "memory"
 
 
 def _garmin_user_id() -> str:
@@ -194,7 +190,7 @@ def _show_profile() -> None:
     g = profile.get("goals", {})
     h = profile.get("health", {})
 
-    if not p.get("name"):
+    if not p and not g and not h:
         console.print("[yellow]Perfil vacío.[/] Usa [bold]/perfil editar objetivo[/] o [bold]/perfil editar salud[/].")
         return
 
@@ -395,21 +391,25 @@ async def main() -> None:
         await agent.initialize()
         console.print(f"[green]✓[/] {len(agent.tools_schema)} herramientas disponibles\n")
 
-        # Paso 1+2: siempre sincronizar datos personales desde Garmin
-        await _sync_from_garmin(agent)
-        agent.user_profile = _load_user_profile()
-
-        # Paso 3: solo la primera vez (o si cambió la cuenta de Garmin)
-        if _is_first_time():
-            # Si cambió la cuenta de Garmin, limpiar el perfil del usuario anterior
+        # Paso 1: comprobar cambio de cuenta ANTES de que sync sobreescriba garmin_user_id
+        is_first = _is_first_time()
+        if is_first:
             profile = _load_user_profile()
-            if profile.get("garmin_user_id") and profile.get("garmin_user_id") != _garmin_user_id():
+            stored_uid = profile.get("garmin_user_id", "")
+            if stored_uid and stored_uid != _garmin_user_id():
                 console.print("[yellow]⚠ Cuenta de Garmin diferente detectada. Reiniciando objetivos y salud...[/]")
                 profile.pop("goals", None)
                 profile.pop("health", None)
                 profile.pop("personal", None)
                 profile.pop("setup_complete", None)
                 _save_user_profile(profile)
+
+        # Paso 2: sincronizar datos personales desde Garmin (sobreescribe garmin_user_id)
+        await _sync_from_garmin(agent)
+        agent.user_profile = _load_user_profile()
+
+        # Paso 3: solo la primera vez (tras haber limpiado el perfil si cambió la cuenta)
+        if is_first:
             _run_first_time_setup()
             agent.user_profile = _load_user_profile()
         console.print("[dim dimgray][debug] Inicio de la sesión. Tokens gastados: 0[/]")
