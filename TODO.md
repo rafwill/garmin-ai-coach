@@ -15,6 +15,7 @@
 | — | **`activityId` fuera del strip set** — el LLM puede encadenar `get_activities → get_activity` |
 | — | **Creación automática de `memory/`** — `MEMORY_DIR.mkdir()` al importar el módulo |
 | 10 | **Validación de inputs del setup** — `target_race_date` (YYYY-MM-DD + fecha futura), `target_time` (H:MM:SS), `weekly_training_hours` (0.5–40), bucle de reintento con mensaje de error |
+| 11 | **Comando `/ayuda`** — ejemplos de preguntas, lista de comandos y guía rápida de indicadores (Body Battery, Readiness, HRV, Training Status) |
 
 ---
 
@@ -112,12 +113,7 @@ Los `print(f"  [debug] ...")` en `trainer_agent.py` y `main.py` son útiles en d
 
 ---
 
-## 💬 11. Comando `/ayuda` en el chat
-
-Añadir al loop de conversación el comando `/ayuda` que muestre un listado de:
-- Qué puede hacer el agente (ejemplos de preguntas)
-- Comandos disponibles (`/perfil`, `/perfil editar...`, `salir`)
-- Cómo interpretar los indicadores de Garmin (body battery, readiness, HRV)
+## 💬 ~~11. Comando `/ayuda` en el chat~~ ✅ Completado
 
 ---
 

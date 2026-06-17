@@ -283,6 +283,37 @@ def _show_profile() -> None:
     )
 
 
+def _show_help() -> None:
+    """Muestra la ayuda del agente: ejemplos de preguntas, comandos y guía de indicadores."""
+    console.print(Panel(
+        "[bold]Ejemplos de preguntas:[/]\n"
+        "  \u00b7 \u00bfCómo estoy hoy? \u00bfPuedo entrenar fuerte?\n"
+        "  \u00b7 Analízame el último entrenamiento\n"
+        "  \u00b7 \u00bfCómo ha evolucionado mi VO\u2082máx en las últimas semanas?\n"
+        "  \u00b7 Propónme un plan de entrenamiento para esta semana\n"
+        "  \u00b7 \u00bfCuáles son mis récords personales?\n"
+        "  \u00b7 \u00bfCómo he dormido últimamente?\n"
+        "  \u00b7 \u00bfQué ritmo debería llevar en mi próxima carrera?\n"
+        "  \u00b7 Analízame mi estado de forma general\n"
+        "\n"
+        "[bold]Comandos disponibles:[/]\n"
+        "  [bold cyan]/perfil[/cyan]                  Ver tu perfil completo\n"
+        "  [bold cyan]/perfil editar objetivo[/cyan]  Cambiar deporte, carrera, tiempo meta\n"
+        "  [bold cyan]/perfil editar salud[/cyan]     Cambiar lesiones y notas de salud\n"
+        "  [bold cyan]/perfil editar[/cyan]           Editar todo el perfil\n"
+        "  [bold cyan]/ayuda[/cyan]                   Mostrar esta pantalla\n"
+        "  [bold cyan]salir[/cyan]                    Terminar la sesión\n"
+        "\n"
+        "[bold]Guía rápida de indicadores Garmin:[/]\n"
+        "  [bold]Body Battery[/bold]       90-100 recuperado \u00b7 70-89 bien \u00b7 40-69 moderado \u00b7 <40 descansa\n"
+        "  [bold]Training Readiness[/bold] >70 entrena fuerte \u00b7 40-70 suave \u00b7 <40 recuperación activa\n"
+        "  [bold]HRV[/bold]               Caída >20% = fatiga, estrés o mal control glucémico (DT1)\n"
+        "  [bold]Training Status[/bold]   Productive=en forma \u00b7 Peaking=pico \u00b7 Overreaching=alarma",
+        title="[bold blue]GarminCoach — Ayuda[/]",
+        border_style="blue",
+    ))
+
+
 console = Console()
 
 
@@ -503,6 +534,10 @@ async def main() -> None:
 
             if cmd in {"/perfil", "/profile"}:
                 _show_profile()
+                continue
+
+            if cmd in {"/ayuda", "/help", "/?"} :
+                _show_help()
                 continue
 
             if cmd in {"/perfil editar objetivo", "/perfil editar goal"}:
