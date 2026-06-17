@@ -16,6 +16,7 @@
 | — | **Creación automática de `memory/`** — `MEMORY_DIR.mkdir()` al importar el módulo |
 | 10 | **Validación de inputs del setup** — `target_race_date` (YYYY-MM-DD + fecha futura), `target_time` (H:MM:SS), `weekly_training_hours` (0.5–40), bucle de reintento con mensaje de error |
 | 11 | **Comando `/ayuda`** — ejemplos de preguntas, lista de comandos y guía rápida de indicadores (Body Battery, Readiness, HRV, Training Status) |
+| 7  | **Tests automatizados** — 93 tests, 0 fallos. `tests/test_trainer_agent.py` (funciones puras + Gemini mock) y `tests/test_main.py` (validaciones + identidad) |
 
 ---
 
@@ -73,15 +74,11 @@ Ejecutar el agente en modo automático cada mañana (tarea programada) para:
 
 ---
 
-## 🧪 7. Tests automatizados
+## ~~🧪 7. Tests automatizados~~ ✅ Completado
 
-Añadir tests unitarios para las funciones críticas:
-- `_normalize_date_args` — normalización de fechas ("hoy", "ayer" → ISO)
-- `_compact_tool_result` — compactación y truncado de resultados Garmin
-- `_compact_personal_records` — conversión de segundos a HH:MM:SS
-- `_GeminiCompletions._parse` — parseo de respuestas y tool calls de Gemini
-- `_strip_garmin_object` — filtrado de campos sin valor analítico
-- `_is_first_time` / `_garmin_user_id` — lógica de detección de primera sesión
+93 tests, 0 fallos — `pytest tests/` en < 6 s:
+- `tests/test_trainer_agent.py`: `_seconds_to_hhmmss`, `_normalize_date_args`, `_strip_garmin_object`, `_compact_tool_result`, `_compact_personal_records`, `_clean_schema_for_gemini`, `_GeminiCompletions._parse`
+- `tests/test_main.py`: `_validate_date`, `_validate_time`, `_validate_hours`, `_garmin_user_id`, `_is_first_time`
 
 ---
 
