@@ -18,16 +18,11 @@ from openai import AsyncOpenAI
 from mcp import ClientSession
 
 from agent.mcp_client import list_available_tools, call_tool
+from agent import storage as _storage
 
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
-MEMORY_DIR  = Path(__file__).parent.parent / "memory"
-
-_PROFILE_FILE = MEMORY_DIR / "user_profile.json"    # datos personales, objetivos, salud
-_CONTEXT_FILE = MEMORY_DIR / "session_context.json"  # historial de mensajes y resúmenes
-
-# Garantizar que el directorio de memoria existe desde el primer import
-MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+MEMORY_DIR  = Path(__file__).parent.parent / "memory"  # mantenido por compatibilidad
 
 
 def _load_system_prompt() -> str:
@@ -36,175 +31,59 @@ def _load_system_prompt() -> str:
     return prompt_file.read_text(encoding="utf-8")
 
 
+# ─── Funciones de persistencia ───────────────────────────────────────────────
+# Thin wrappers sobre agent.storage para mantener compatibilidad con imports
+# existentes en main.py y los tests. Toda la lógica (Supabase + fallback JSON)
+# vive en agent/storage.py.
+
 def _load_user_profile() -> dict:
     """Carga el perfil del usuario (datos personales, objetivos, salud)."""
-    if _PROFILE_FILE.exists():
-        return json.loads(_PROFILE_FILE.read_text(encoding="utf-8"))
-    return {}
+    return _storage.load_user_profile()
 
 
 def _save_user_profile(profile: dict) -> None:
-    """Guarda el perfil del usuario en disco."""
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    _PROFILE_FILE.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Guarda el perfil del usuario."""
+    _storage.save_user_profile(profile)
 
 
 def _load_session_context() -> dict:
     """Carga el contexto de sesiones (historial de mensajes y resúmenes)."""
-    if _CONTEXT_FILE.exists():
-        try:
-            return json.loads(_CONTEXT_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {"history": [], "session_summaries": []}
+    return _storage.load_session_context()
 
 
 def _save_session_context(ctx: dict) -> None:
-    """Guarda el contexto de sesiones en disco."""
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    _CONTEXT_FILE.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Guarda el contexto de sesiones."""
+    _storage.save_session_context(ctx)
 
 
 def _save_history_entry(role: str, content: str) -> None:
     """Añade una entrada al historial de conversación persistente."""
-    ctx = _load_session_context()
-    ctx.setdefault("history", []).append({"role": role, "content": content})
-    ctx["history"] = ctx["history"][-50:]  # últimas 50 entradas
-    _save_session_context(ctx)
+    _storage.save_history_entry(role, content)
 
 
 def _load_session_summaries() -> list[dict]:
     """Carga los resúmenes de sesiones anteriores."""
-    return _load_session_context().get("session_summaries", [])
+    return _storage.load_session_summaries()
 
 
 def _persist_session_summary(summary: str) -> None:
     """Guarda el resumen de la sesión actual en el contexto persistente."""
-    ctx = _load_session_context()
-    summaries = ctx.get("session_summaries", [])
-    summaries.append({"date": date.today().isoformat(), "summary": summary[:600]})
-    ctx["session_summaries"] = summaries[-10:]  # últimos 10 resúmenes
-    _save_session_context(ctx)
-
-
-def _get_gemini_daily_file() -> Path:
-    """Devuelve la ruta al archivo de uso diario de Gemini."""
-    return MEMORY_DIR / "gemini_daily_usage.json"
+    _storage.persist_session_summary(summary)
 
 
 def get_gemini_daily_usage(api_key: str) -> int:
     """Obtiene los tokens consumidos hoy para una API key específica."""
-    if not api_key:
-        return 0
-    file_path = _get_gemini_daily_file()
-    if not file_path.exists():
-        return 0
-    try:
-        data = json.loads(file_path.read_text(encoding="utf-8"))
-        today_str = date.today().isoformat()
-        key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
-        day_data = data.get(key_hash, {}).get(today_str, 0)
-        if isinstance(day_data, dict):
-            return day_data.get("tokens", 0)
-        return day_data
-    except Exception:
-        return 0
+    return _storage.get_gemini_daily_usage(api_key)
 
 
 def update_gemini_daily_usage(api_key: str, tokens: int) -> int:
     """Actualiza y devuelve los tokens acumulados hoy para una API key específica."""
-    if not api_key or tokens <= 0:
-        return get_gemini_daily_usage(api_key)
-    
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    file_path = _get_gemini_daily_file()
-    
-    data = {}
-    if file_path.exists():
-        try:
-            data = json.loads(file_path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-            
-    today_str = date.today().isoformat()
-    key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
-    
-    if key_hash not in data:
-        data[key_hash] = {}
-        
-    day_data = data[key_hash].get(today_str, 0)
-    current_tokens = 0
-    quota_exhausted = False
-    
-    if isinstance(day_data, dict):
-        current_tokens = day_data.get("tokens", 0)
-        quota_exhausted = day_data.get("quota_exhausted", False)
-    elif isinstance(day_data, int):
-        current_tokens = day_data
-        
-    new_total = current_tokens + tokens
-    if quota_exhausted:
-        new_total = max(new_total, 1000000)
-        
-    data[key_hash][today_str] = {
-        "tokens": new_total,
-        "quota_exhausted": quota_exhausted
-    }
-    
-    # Limpiar entradas de más de 30 días para que el archivo no crezca indefinidamente
-    try:
-        cutoff = (datetime.now() - timedelta(days=30)).date().isoformat()
-        for kh in list(data.keys()):
-            if isinstance(data[kh], dict):
-                for d_str in list(data[kh].keys()):
-                    if d_str < cutoff:
-                        del data[kh][d_str]
-    except Exception:
-        pass
-
-    try:
-        file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-        
-    return new_total
+    return _storage.update_gemini_daily_usage(api_key, tokens)
 
 
 def mark_gemini_quota_exhausted(api_key: str) -> None:
     """Marca la API key específica como agotada por cuota para el día de hoy."""
-    if not api_key:
-        return
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    file_path = _get_gemini_daily_file()
-    data = {}
-    if file_path.exists():
-        try:
-            data = json.loads(file_path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-            
-    today_str = date.today().isoformat()
-    key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
-    
-    if key_hash not in data:
-        data[key_hash] = {}
-        
-    current_tokens = 0
-    day_data = data[key_hash].get(today_str, 0)
-    if isinstance(day_data, dict):
-        current_tokens = day_data.get("tokens", 0)
-    elif isinstance(day_data, int):
-        current_tokens = day_data
-        
-    data[key_hash][today_str] = {
-        "tokens": current_tokens,
-        "quota_exhausted": True,
-    }
-
-    try:
-        file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    _storage.mark_gemini_quota_exhausted(api_key)
 
 
 # Herramientas esenciales para el agente entrenador
@@ -847,31 +726,16 @@ class TrainerAgent:
 
     def get_gemini_daily_info(self) -> dict:
         """Devuelve información sobre el uso diario de tokens de Gemini."""
-        api_key = os.environ.get("GEMINI_API_KEY", "")
-
-        # Consultar si está marcada como agotada por cuota hoy
-        is_exhausted = False
-        file_path = _get_gemini_daily_file()
-        if file_path.exists():
-            try:
-                data = json.loads(file_path.read_text(encoding="utf-8"))
-                today_str = date.today().isoformat()
-                key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
-                day_data = data.get(key_hash, {}).get(today_str, 0)
-                if isinstance(day_data, dict):
-                    is_exhausted = day_data.get("quota_exhausted", False)
-            except Exception:
-                pass
-                
-        today_usage = get_gemini_daily_usage(api_key)
-        limit = 1000000
-        remaining = max(0, limit - today_usage)
+        api_key      = os.environ.get("GEMINI_API_KEY", "")
+        today_usage  = get_gemini_daily_usage(api_key)
+        is_exhausted = _storage.is_gemini_quota_exhausted(api_key)
+        limit        = 1_000_000
         return {
-            "today_usage": today_usage,
-            "limit": limit,
-            "remaining": remaining,
-            "has_key": bool(api_key),
-            "quota_exhausted": is_exhausted or today_usage >= limit
+            "today_usage":     today_usage,
+            "limit":           limit,
+            "remaining":       max(0, limit - today_usage),
+            "has_key":         bool(api_key),
+            "quota_exhausted": is_exhausted or today_usage >= limit,
         }
 
     def _build_system_prompt(self) -> str:

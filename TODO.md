@@ -17,33 +17,11 @@
 | 10 | **Validación de inputs del setup** — `target_race_date` (YYYY-MM-DD + fecha futura), `target_time` (H:MM:SS), `weekly_training_hours` (0.5–40), bucle de reintento con mensaje de error |
 | 11 | **Comando `/ayuda`** — ejemplos de preguntas, lista de comandos y guía rápida de indicadores (Body Battery, Readiness, HRV, Training Status) |
 | 7  | **Tests automatizados** — 93 tests, 0 fallos. `tests/test_trainer_agent.py` (funciones puras + Gemini mock) y `tests/test_main.py` (validaciones + identidad) |
+| 1B | **Supabase** — `agent/storage.py` unifica la persistencia: Supabase como primario (3 tablas: `user_profile`, `session_context`, `gemini_usage`) + fallback automático a JSON local si no está configurado. `supabase/schema.sql` listo para ejecutar. |
 
 ---
 
-## 🗄️ 1. Migrar almacenamiento de disco a base de datos
-
-**Problema actual:** La memoria del agente (historial, resúmenes de sesión, perfil de usuario) se guarda en ficheros JSON locales. No escala, no permite consultas, y no es apto para acceso desde múltiples dispositivos.
-
-### Opción A — SQLite (local, sin infraestructura)
-- Cero dependencias externas, fichero único `.db` en disco
-- Ideal si el agente siempre corre en la misma máquina
-- Librería: `aiosqlite` (async) o `sqlite3` (stdlib)
-- Tablas sugeridas: `sessions`, `session_summaries`, `user_profile`, `history`
-
-### Opción B — Supabase (cloud, multiusuario) ← recomendado para multi-dispositivo
-- PostgreSQL gestionado con API REST y SDK Python (`supabase-py`)
-- Permite acceder al historial desde cualquier dispositivo
-- Capa gratuita: 500 MB de base de datos, 2 GB de storage
-- Registro: https://supabase.com → nuevo proyecto → obtener `SUPABASE_URL` y `SUPABASE_ANON_KEY`
-- Variables a añadir al `.env`:
-  ```
-  SUPABASE_URL=https://xxxx.supabase.co
-  SUPABASE_ANON_KEY=eyJ...
-  ```
-
-**Ficheros afectados:**
-- `agent/trainer_agent.py` — `_load_user_profile`, `_save_user_profile`, `_load_session_context`, `_save_session_context`, `_persist_session_summary`, `_load_session_summaries`, `update_gemini_daily_usage`, `mark_gemini_quota_exhausted`
-- `requirements.txt` — añadir `aiosqlite` o `supabase`
+## 🗄️ ~~1. Migrar almacenamiento de disco a base de datos~~ ✅ Completado
 
 ---
 

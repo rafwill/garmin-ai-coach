@@ -100,6 +100,21 @@ uvx --python 3.12 --from git+https://github.com/Taxuspt/garmin_mcp garmin-mcp-au
 ```
 > Los tokens son válidos aproximadamente **6 meses**. Repite este paso cuando expiren.
 
+### 4. (Opcional) Configurar Supabase
+
+Sin Supabase el agente usa ficheros JSON locales. Si quieres persistencia en la nube (historial accesible desde cualquier dispositivo):
+
+1. Crea un proyecto gratuito en [supabase.com](https://supabase.com) (500 MB, sin tarjeta).
+2. Ve a **SQL Editor → New query**, pega el contenido de [`supabase/schema.sql`](supabase/schema.sql) y pulsa **Run**.
+3. En **Settings → API** copia tu *Project URL* y *anon public key*.
+4. Añade al `.env`:
+   ```dotenv
+   SUPABASE_URL=https://xxxxxxxxxxxx.supabase.co
+   SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+   ```
+
+> Si las variables no están configuradas o Supabase falla, el agente **cae automáticamente a los ficheros locales** sin ningún error visible.
+
 ---
 
 ## 🏃‍♂️ Uso
@@ -174,13 +189,16 @@ garmin-ai-coach/
 │   ├── __init__.py
 │   ├── main.py            # Punto de entrada: menú de proveedor, herramientas, chat e interfaz de usuario.
 │   ├── mcp_client.py      # Cliente MCP asíncrono — lanza garmin_mcp vía uvx.
-│   └── trainer_agent.py   # Agente: tool-calling, adaptadores LLM, memoria persistente.
+│   ├── storage.py         # Capa de persistencia: Supabase (si configurado) + fallback a JSON local.
+│   └── trainer_agent.py   # Agente: tool-calling, adaptadores LLM, lógica de conversación.
 ├── memory/                # Generado automáticamente al arrancar. NO subir a git.
 │   ├── user_profile.json       # Perfil del deportista: personal, objetivos, salud.
 │   ├── session_context.json    # Historial de conversación y resúmenes de sesiones.
 │   └── gemini_daily_usage.json # Control de cuota diaria de Gemini (API key hasheada).
 ├── prompts/
 │   └── system_prompt.md   # Personalidad, herramientas MCP y protocolos del entrenador.
+├── supabase/
+│   └── schema.sql         # DDL para crear las tablas en Supabase (ejecutar en SQL Editor).
 ├── tests/
 │   ├── __init__.py
 │   ├── test_trainer_agent.py  # 54 tests: funciones puras + mock de Gemini.
