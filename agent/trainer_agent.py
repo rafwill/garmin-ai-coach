@@ -197,9 +197,10 @@ def mark_gemini_quota_exhausted(api_key: str) -> None:
         current_tokens = day_data
         
     data[key_hash][today_str] = {
-            "tokens": current_tokens,
+        "tokens": current_tokens,
+        "quota_exhausted": True,
     }
-    
+
     try:
         file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
@@ -384,26 +385,6 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
             return raw[:_MAX_TOOL_RESULT_CHARS] + "...(truncado)"
         return raw
 
-
-ESSENTIAL_TOOLS = {
-    # Actividades
-    "get_last_activity", "get_activities_by_date", "get_activity_hr_zones",
-    "get_activity_splits", "get_progress_summary", "get_activities",
-    # Salud diaria
-    "get_daily_summary", "get_heart_rate", "get_body_battery",
-    "get_stress", "get_intensity_minutes", "get_resting_heart_rate",
-    "get_steps", "get_respiration", "get_spo2", "get_hydration",
-    # Rendimiento
-    "get_training_readiness", "get_training_status", "get_hrv",
-    "get_vo2max", "get_race_predictions", "get_personal_records",
-    "get_endurance_score", "get_fitness_age", "get_lactate_threshold",
-    # Sueño
-    "get_sleep_data",
-    # Composición corporal
-    "get_body_composition", "get_latest_weight",
-    # Perfil
-    "get_user_profile", "get_goals",
-}
 
 
 def _build_tools_schema(tools: list[dict]) -> list[dict]:
@@ -906,11 +887,10 @@ class TrainerAgent:
         p = self.user_profile.get("personal", {})
         g = self.user_profile.get("goals", {})
         h = self.user_profile.get("health", {})
-        if p.get("name"):
-            lines = [
-                f"- Nombre: {p.get('name', '')}",
-                f"- Edad: {p.get('age', 'desconocida')} años",
-            ]
+        if p or g or h:
+            lines = []
+            if p.get("name"):          lines.append(f"- Nombre: {p['name']}")
+            if p.get("age"):           lines.append(f"- Edad: {p['age']} años")
             if p.get("gender"):        lines.append(f"- Género: {p['gender']}")
             if p.get("weight_kg"):     lines.append(f"- Peso: {p['weight_kg']} kg")
             if p.get("height_cm"):     lines.append(f"- Altura: {p['height_cm']} cm")
@@ -922,7 +902,8 @@ class TrainerAgent:
             injuries = h.get("injuries", [])
             if injuries:               lines.append(f"- Lesiones/condiciones: {', '.join(injuries)}")
             if h.get("notes"):         lines.append(f"- Notas de salud: {h['notes']}")
-            profile_context = "\n\n## Perfil del usuario\n" + "\n".join(lines) + "\n"
+            if lines:
+                profile_context = "\n\n## Perfil del usuario\n" + "\n".join(lines) + "\n"
 
         # Incluir resúmenes de sesiones anteriores para memoria a largo plazo
         memory_context = ""

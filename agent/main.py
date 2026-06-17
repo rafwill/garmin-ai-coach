@@ -102,9 +102,9 @@ def _ask_goals(profile: dict) -> None:
     console.print("\n[bold]Objetivos de entrenamiento:[/]")
 
     sport = Prompt.ask(
-        "  Deporte principal",
-        choices=["running", "trail running", "triatlón", "ciclismo", "otro", ""],
-        default=g.get("primary", ""),
+        "  Deporte principal [dim](Enter para omitir)[/]",
+        choices=["running", "trail running", "triatlón", "ciclismo", "otro"],
+        default=g.get("primary", "running") or "running",
         show_choices=True,
     )
     if sport.strip():
