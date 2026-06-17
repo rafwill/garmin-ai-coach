@@ -20,5 +20,3 @@ python-dotenv>=1.0.0
 
 # Interfaz CLI enriquecida
 rich>=13.7.0
-
-# Fechas y utilidades

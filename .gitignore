@@ -23,8 +23,8 @@ build/
 # Node
 node_modules/
 
-# VS Code
-.vscode/settings.json
+# VS Code (configuración local de cada desarrollador)
+.vscode/
 
 # Memoria del usuario (puede contener datos personales)
 memory/user_profile.json
