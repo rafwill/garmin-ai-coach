@@ -14,6 +14,7 @@
 | — | **system_prompt.md reescrito** — herramientas reales del MCP, protocolos DT1, protocolos de análisis correctos |
 | — | **`activityId` fuera del strip set** — el LLM puede encadenar `get_activities → get_activity` |
 | — | **Creación automática de `memory/`** — `MEMORY_DIR.mkdir()` al importar el módulo |
+| 10 | **Validación de inputs del setup** — `target_race_date` (YYYY-MM-DD + fecha futura), `target_time` (H:MM:SS), `weekly_training_hours` (0.5–40), bucle de reintento con mensaje de error |
 
 ---
 
@@ -107,12 +108,7 @@ Los `print(f"  [debug] ...")` en `trainer_agent.py` y `main.py` son útiles en d
 
 ---
 
-## 📅 10. Validación de inputs del setup inicial
-
-Actualmente `_ask_goals` acepta cualquier string en los campos de fecha y tiempo sin validar:
-- `target_race_date` — debería validar formato `YYYY-MM-DD` y que sea fecha futura
-- `target_time` — debería validar formato `H:MM:SS` o `HH:MM:SS`
-- `weekly_training_hours` — ya se valida el tipo float, pero no el rango razonable (0–40 h)
+## 📅 ~~10. Validación de inputs del setup inicial~~ ✅ Completado
 
 ---
 

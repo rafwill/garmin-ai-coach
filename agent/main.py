@@ -7,7 +7,9 @@ Interfaz de conversación en terminal.
 import asyncio
 import hashlib
 import os
+import re
 import sys
+from datetime import date
 from pathlib import Path
 
 import httpx
@@ -92,6 +94,45 @@ def _is_first_time() -> bool:
     return not profile.get("setup_complete", False)
 
 
+def _validate_date(value: str) -> tuple[bool, str]:
+    """Valida formato YYYY-MM-DD y que la fecha sea futura. Devuelve (valido, mensaje_error)."""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        return False, "Formato incorrecto. Usa YYYY-MM-DD (ej: 2026-07-02)"
+    try:
+        d = date.fromisoformat(value)
+    except ValueError:
+        return False, "Fecha inválida (mes o día fuera de rango)"
+    if d <= date.today():
+        return False, f"La fecha debe ser futura (hoy es {date.today().isoformat()})"
+    return True, ""
+
+
+def _validate_time(value: str) -> tuple[bool, str]:
+    """Valida formato H:MM:SS o HH:MM:SS. Devuelve (valido, mensaje_error)."""
+    m = re.match(r"^(\d{1,3}):(\d{2}):(\d{2})$", value)
+    if not m:
+        return False, "Formato incorrecto. Usa H:MM:SS (ej: 9:30:00) o HH:MM:SS (ej: 13:45:00)"
+    h, mn, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if mn > 59 or s > 59:
+        return False, "Minutos y segundos deben estar entre 00 y 59"
+    if h > 99:
+        return False, "Horas deben ser menores de 100"
+    return True, ""
+
+
+def _validate_hours(value: str) -> tuple[bool, str]:
+    """Valida horas de entrenamiento semanal (0.5 – 40). Devuelve (valido, mensaje_error)."""
+    try:
+        h = float(value.replace(",", "."))
+    except ValueError:
+        return False, "Introduce un número (ej: 8 o 10.5)"
+    if h < 0.5:
+        return False, "El mínimo es 0.5 horas/semana"
+    if h > 40:
+        return False, "El máximo es 40 horas/semana. ¿Seguro?"
+    return True, ""
+
+
 def _ask_goals(profile: dict) -> None:
     """Pregunta y guarda los campos de objetivos de entrenamiento."""
     g = profile.setdefault("goals", {})
@@ -106,36 +147,54 @@ def _ask_goals(profile: dict) -> None:
     if sport.strip():
         g["primary"] = sport.strip()
 
-    hours = Prompt.ask(
-        "  Horas de entrenamiento por semana [dim](ej: 10)[/]",
-        default=str(g.get("weekly_training_hours", "")),
-    )
-    try:
-        if hours.strip():
+    # Horas/semana con validación de rango
+    while True:
+        hours = Prompt.ask(
+            "  Horas de entrenamiento por semana [dim](ej: 10 · Enter para omitir)[/]",
+            default=str(g.get("weekly_training_hours", "")),
+        )
+        if not hours.strip():
+            break
+        ok, err = _validate_hours(hours.strip())
+        if ok:
             g["weekly_training_hours"] = float(hours.strip().replace(",", "."))
-    except ValueError:
-        pass
+            break
+        console.print(f"  [red]✗[/] {err}")
 
     race = Prompt.ask(
-        "  Próxima carrera/evento objetivo [dim](ej: Ultra PDA 55km)[/]",
+        "  Próxima carrera/evento objetivo [dim](ej: Ultra PDA 55km · Enter para omitir)[/]",
         default=g.get("target_race", ""),
     )
     if race.strip():
         g["target_race"] = race.strip()
 
-    race_date = Prompt.ask(
-        "  Fecha del evento [dim](YYYY-MM-DD)[/]",
-        default=g.get("target_race_date", ""),
-    )
-    if race_date.strip():
-        g["target_race_date"] = race_date.strip()
+    # Fecha del evento con validación de formato y fecha futura
+    while True:
+        race_date = Prompt.ask(
+            "  Fecha del evento [dim](YYYY-MM-DD · Enter para omitir)[/]",
+            default=g.get("target_race_date", ""),
+        )
+        if not race_date.strip():
+            break
+        ok, err = _validate_date(race_date.strip())
+        if ok:
+            g["target_race_date"] = race_date.strip()
+            break
+        console.print(f"  [red]✗[/] {err}")
 
-    target_time = Prompt.ask(
-        "  Tiempo objetivo [dim](ej: 3:30:00)[/]",
-        default=g.get("target_time", ""),
-    )
-    if target_time.strip():
-        g["target_time"] = target_time.strip()
+    # Tiempo objetivo con validación de formato
+    while True:
+        target_time = Prompt.ask(
+            "  Tiempo objetivo [dim](H:MM:SS · ej: 9:30:00 · Enter para omitir)[/]",
+            default=g.get("target_time", ""),
+        )
+        if not target_time.strip():
+            break
+        ok, err = _validate_time(target_time.strip())
+        if ok:
+            g["target_time"] = target_time.strip()
+            break
+        console.print(f"  [red]✗[/] {err}")
 
 
 def _ask_health(profile: dict) -> None:
