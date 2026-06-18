@@ -310,12 +310,13 @@ def _show_help() -> None:
         "  \u00b7 Analízame mi estado de forma general\n"
         "\n"
         "[bold]Comandos disponibles:[/]\n"
-        "  [bold cyan]/perfil[/cyan]                  Ver tu perfil completo\n"
-        "  [bold cyan]/perfil editar objetivo[/cyan]  Cambiar deporte, carrera, tiempo meta\n"
-        "  [bold cyan]/perfil editar salud[/cyan]     Cambiar lesiones y notas de salud\n"
-        "  [bold cyan]/perfil editar[/cyan]           Editar todo el perfil\n"
-        "  [bold cyan]/ayuda[/cyan]                   Mostrar esta pantalla\n"
-        "  [bold cyan]salir[/cyan]                    Terminar la sesión\n"
+        "  [bold cyan]/perfil[/bold cyan]                  Ver tu perfil completo\n"
+        "  [bold cyan]/perfil editar objetivo[/bold cyan]  Cambiar deporte, carrera, tiempo meta\n"
+        "  [bold cyan]/perfil editar salud[/bold cyan]     Cambiar lesiones y notas de salud\n"
+        "  [bold cyan]/perfil editar[/bold cyan]           Editar todo el perfil\n"
+        "  [bold cyan]/modelo[/bold cyan]                  Cambiar el proveedor de modelo de IA activo\n"
+        "  [bold cyan]/ayuda[/bold cyan]                   Mostrar esta pantalla\n"
+        "  [bold cyan]salir[/bold cyan]                    Terminar la sesión\n"
         "\n"
         "[bold]Guía rápida de indicadores Garmin:[/]\n"
         "  [bold]Body Battery[/bold]       90-100 recuperado \u00b7 70-89 bien \u00b7 40-69 moderado \u00b7 <40 descansa\n"
@@ -409,12 +410,67 @@ def _best_available_provider() -> str | None:
     return None
 
 
+def _select_provider_menu(on_vpn: bool) -> str:
+    """Muestra el menú de selección de proveedor LLM."""
+    from agent.storage import is_gemini_quota_exhausted, get_gemini_daily_usage
+
+    # Sin VPN o cambio de modelo: construir lista de proveedores disponibles
+    candidates = [
+        ("gemini",   "GEMINI_API_KEY"),
+        ("mistral",  "MISTRAL_API_KEY"),
+        ("groq",     "GROQ_API_KEY"),
+        ("cerebras", "CEREBRAS_API_KEY"),
+    ]
+    available = []
+    for name, env_var in candidates:
+        val = os.environ.get(env_var, "")
+        if val and val not in _PLACEHOLDER_VALUES:
+            available.append((name, env_var))
+
+    if not available:
+        console.print(
+            "[bold red]Error:[/] No hay ninguna API key configurada en .env\n"
+            "Configura al menos una de: [bold]GEMINI_API_KEY[/], [bold]MISTRAL_API_KEY[/], "
+            "[bold]GROQ_API_KEY[/]"
+        )
+        sys.exit(1)
+
+    # Mostrar menú de selección
+    menu_lines = ["[bold]Elige el modelo de IA:[/]\n"]
+    for i, (name, env_var) in enumerate(available, 1):
+        _, label, note = _PROVIDER_INFO[name]
+        api_key = os.environ.get(env_var, "")
+        extra = ""
+        
+        # Consultar la base de datos de forma dinámica
+        usage = get_gemini_daily_usage(api_key) if api_key else 0
+        exhausted = is_gemini_quota_exhausted(api_key) if api_key else False
+        
+        if exhausted:
+            extra = " [dim red](cuota agotada hoy)[/dim red]"
+        elif usage > 0:
+            extra = f" [dim cyan]({usage:,} tokens consumidos hoy)[/dim cyan]"
+        elif i == 1:
+            extra = "  [bold]← recomendado[/bold]"
+            
+        menu_lines.append(f"  [green]{i}[/green] · {label}  [dim]({note})[/dim]{extra}")
+
+    console.print(Panel.fit(
+        "\n".join(menu_lines),
+        title="[bold blue]GarminCoach — Selección de modelo[/]",
+        border_style="blue",
+    ))
+    choices = [str(i) for i in range(1, len(available) + 1)]
+    choice = Prompt.ask("  Tu elección", choices=choices, default="1", case_sensitive=False)
+    return available[int(choice) - 1][0]
+
+
 def _auto_select_provider() -> str:
     """
     Detecta el entorno de red (VPN corporativa con Zscaler vs. acceso libre)
-    y selecciona automáticamente el proveedor LLM más adecuado.
-    - Con Zscaler → GitHub Models (acceso permitido por la VPN)
-    - Sin Zscaler → mejor proveedor configurado en .env (gemini, mistral, groq…)
+    y selecciona el proveedor LLM.
+    - Con Zscaler → GitHub Models (acceso permitido por la VPN) — automático
+    - Sin Zscaler → menú para elegir entre los proveedores configurados en .env
     """
     console.print("[dim]Detectando entorno de red...[/]")
     on_vpn = _detect_zscaler()
@@ -429,23 +485,20 @@ def _auto_select_provider() -> str:
                 "Obtén un token gratuito en: https://github.com/settings/tokens"
             )
             sys.exit(1)
-        icon = "🏢"
-        env_desc = "Red corporativa [dim](Zscaler detectado)[/dim]"
-    else:
-        provider = _best_available_provider()
-        if provider is None:
-            console.print(
-                "[bold red]Error:[/] Sin VPN corporativa y sin ninguna API key configurada en .env\n"
-                "Configura al menos una de: [bold]GEMINI_API_KEY[/], [bold]MISTRAL_API_KEY[/], "
-                "[bold]GROQ_API_KEY[/]"
-            )
-            sys.exit(1)
-        icon = "🌐"
-        env_desc = "Sin VPN corporativa"
+        _, label, note = _PROVIDER_INFO[provider]
+        console.print(Panel.fit(
+            f"🏢  Red corporativa [dim](Zscaler detectado)[/dim]\n"
+            f"[bold green]Proveedor seleccionado:[/] {label}\n"
+            f"[dim]{note}[/dim]",
+            title="[bold blue]GarminCoach — Entorno detectado[/]",
+            border_style="blue",
+        ))
+        return provider
 
+    provider = _select_provider_menu(on_vpn=False)
     _, label, note = _PROVIDER_INFO[provider]
     console.print(Panel.fit(
-        f"{icon}  {env_desc}\n"
+        f"🌐  Sin VPN corporativa\n"
         f"[bold green]Proveedor seleccionado:[/] {label}\n"
         f"[dim]{note}[/dim]",
         title="[bold blue]GarminCoach — Entorno detectado[/]",
@@ -560,22 +613,23 @@ async def main() -> None:
             _run_first_time_setup()
             agent.user_profile = _load_user_profile()
         console.print("[dim dimgray][debug] Inicio de la sesión. Tokens gastados: 0[/]")
-        if provider == "gemini":
-            daily_info = agent.get_gemini_daily_info()
-            if daily_info.get("quota_exhausted", False):
-                console.print(
-                    f"[bold red][Aviso][/] La API Key de Gemini está marcada hoy como agotada por límite de cuota (RESOURCE_EXHAUSTED).\n"
-                    f"[dim dimgray]        - Consumo registrado: {daily_info['today_usage']:,} / {daily_info['limit']:,} tokens hoy.\n"
-                    f"        - Tokens gratuitos disponibles: 0[/]"
-                )
-            else:
-                console.print(
-                    f"[dim dimgray][debug] Acumulado diario de Gemini: "
-                    f"{daily_info['today_usage']:,} / {daily_info['limit']:,} tokens gastados hoy. "
-                    f"Te quedan {daily_info['remaining']:,} tokens gratuitos hoy.[/]"
-                )
+        
+        daily_info = agent.get_daily_usage_info()
+        provider_name = provider.capitalize() if provider != "vpn" else "GitHub Models"
+        if daily_info.get("quota_exhausted", False):
+            console.print(
+                f"[bold red][Aviso][/] La API Key de {provider_name} está marcada hoy como agotada por límite de cuota.\n"
+                f"[dim dimgray]        - Consumo registrado: {daily_info['today_usage']:,} / {daily_info['limit']:,} tokens hoy.\n"
+                f"        - Tokens disponibles hoy: 0[/]"
+            )
+        else:
+            console.print(
+                f"[dim dimgray][debug] Acumulado diario de {provider_name}: "
+                f"{daily_info['today_usage']:,} / {daily_info['limit']:,} tokens gastados hoy. "
+                f"Te quedan {daily_info['remaining']:,} tokens hoy.[/]"
+            )
 
-        console.print(Rule("[dim]Escribe tu pregunta · [bold]/perfil[/bold] · [bold]/perfil editar objetivo[/bold] · [bold]/perfil editar salud[/bold] · [bold]salir[/bold][/]"))
+        console.print(Rule("[dim]Escribe tu pregunta · [bold]/perfil[/bold] · [bold]/modelo[/bold] · [bold]/perfil editar objetivo[/bold] · [bold]/perfil editar salud[/bold] · [bold]salir[/bold][/]"))
 
         while True:
             try:
@@ -588,6 +642,58 @@ async def main() -> None:
 
             # Comandos especiales
             cmd = user_input.strip().lower()
+
+            if cmd in {"/modelo", "/model"}:
+                # Mostrar tokens usados para el proveedor que está a punto de desactivarse
+                p_tokens = agent.total_prompt_tokens
+                c_tokens = agent.total_completion_tokens
+                t_tokens = p_tokens + c_tokens
+                old_provider_name = provider.capitalize() if provider != "vpn" else "GitHub Models"
+                console.print(f"\n[bold dimgray][debug] Cambiando de modelo. Tokens gastados con {old_provider_name} en esta sesión:[/]")
+                console.print(f"[dim dimgray]        - Prompt/Entrada:    {p_tokens:,}[/]")
+                console.print(f"[dim dimgray]        - Completion/Salida: {c_tokens:,}[/]")
+                console.print(f"[dim dimgray]        - Total acumulado:   {t_tokens:,}[/]")
+                
+                # Seleccionar nuevo proveedor
+                on_vpn = _detect_zscaler()
+                new_provider = _select_provider_menu(on_vpn=on_vpn)
+                
+                if new_provider == provider:
+                    console.print(f"[yellow]El modelo {old_provider_name} ya está activo.[/]")
+                    continue
+                
+                # Actualizar el proveedor y reiniciar los tokens de sesión para el nuevo tramo
+                provider = new_provider
+                _check_env(provider)
+                agent.set_provider(provider)
+                agent.total_prompt_tokens = 0
+                agent.total_completion_tokens = 0
+                
+                new_provider_name = provider.capitalize() if provider != "vpn" else "GitHub Models"
+                _, label, note = _PROVIDER_INFO[provider]
+                console.print(Panel.fit(
+                    f"[bold green]Modelo cambiado con éxito[/]\n"
+                    f"Nuevo proveedor: {label}\n"
+                    f"[dim]{note}[/dim]",
+                    title="[bold blue]GarminCoach — Cambio de modelo[/]",
+                    border_style="green",
+                ))
+                
+                # Mostrar info de cuota para el nuevo proveedor
+                daily_info = agent.get_daily_usage_info()
+                if daily_info.get("quota_exhausted", False):
+                    console.print(
+                        f"[bold red][Aviso][/] La API Key de {new_provider_name} está marcada hoy como agotada por límite de cuota.\n"
+                        f"[dim dimgray]        - Consumo registrado: {daily_info['today_usage']:,} / {daily_info['limit']:,} tokens hoy.\n"
+                        f"        - Tokens disponibles hoy: 0[/]"
+                    )
+                else:
+                    console.print(
+                        f"[dim dimgray][debug] Acumulado diario de {new_provider_name}: "
+                        f"{daily_info['today_usage']:,} / {daily_info['limit']:,} tokens gastados hoy. "
+                        f"Te quedan {daily_info['remaining']:,} tokens hoy.[/]"
+                    )
+                continue
 
             if cmd in {"/perfil", "/profile"}:
                 _show_profile()
@@ -651,20 +757,21 @@ async def main() -> None:
         console.print(f"[dim dimgray]        - Prompt/Entrada:    {p_tokens:,}[/]")
         console.print(f"[dim dimgray]        - Completion/Salida: {c_tokens:,}[/]")
         console.print(f"[dim dimgray]        - Total acumulado:   {t_tokens:,}[/]")
-        if provider == "gemini":
-            daily_info = agent.get_gemini_daily_info()
-            if daily_info.get("quota_exhausted", False):
-                console.print(
-                    f"[bold red][Aviso][/] La API Key de Gemini ha marcado hoy el límite de cuota agotada (RESOURCE_EXHAUSTED).\n"
-                    f"[dim dimgray]        - Consumo global hoy: {daily_info['today_usage']:,} / {daily_info['limit']:,} tokens.\n"
-                    f"        - Tokens gratuitos hoy: 0 (La API de Google bloqueó tu clave debido al plan)[/]"
-                )
-            else:
-                console.print(
-                    f"[dim dimgray][debug] Acumulado diario de Gemini global: "
-                    f"{daily_info['today_usage']:,} / {daily_info['limit']:,} tokens gastados hoy. "
-                    f"Te quedan {daily_info['remaining']:,} tokens gratuitos hoy.[/]"
-                )
+        
+        daily_info = agent.get_daily_usage_info()
+        provider_name = provider.capitalize() if provider != "vpn" else "GitHub Models"
+        if daily_info.get("quota_exhausted", False):
+            console.print(
+                f"[bold red][Aviso][/] La API Key de {provider_name} ha marcado hoy el límite de cuota agotada.\n"
+                f"[dim dimgray]        - Consumo global hoy: {daily_info['today_usage']:,} / {daily_info['limit']:,} tokens.\n"
+                f"        - Tokens gratuitos hoy: 0[/]"
+            )
+        else:
+            console.print(
+                f"[dim dimgray][debug] Acumulado diario de {provider_name} global: "
+                f"{daily_info['today_usage']:,} / {daily_info['limit']:,} tokens gastados hoy. "
+                f"Te quedan {daily_info['remaining']:,} tokens hoy.[/]"
+            )
 
     console.print("\n[dim]Sesión finalizada. ¡Hasta el próximo entrenamiento![/]")
 

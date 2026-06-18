@@ -534,8 +534,6 @@ class _GeminiCompletions:
             c_tokens = getattr(meta, "candidates_token_count", 0) or 0
             t_tokens = getattr(meta, "total_token_count", 0) or 0
             usage = _GUsage(prompt_tokens=p_tokens, completion_tokens=c_tokens, total_tokens=t_tokens)
-            # Actualizar uso hoy
-            update_gemini_daily_usage(self._api_key, t_tokens)
 
         return _GResponse(choices=[_GChoice(message=msg, finish_reason="stop")], usage=usage)
 
@@ -589,6 +587,22 @@ class TrainerAgent:
     """
 
     def __init__(self, mcp_session: ClientSession, provider: str = "vpn"):
+        self.mcp_session = mcp_session
+        self.set_provider(provider)
+        # GitHub Models (vpn) tiene limite de ~8000 tokens en el request;
+        # usamos el prompt compacto para dejar espacio a tools + contexto.
+        self.system_prompt = _load_system_prompt(compact=(provider == "vpn"))
+        self.user_profile = _load_user_profile()
+        self.conversation_history: list[dict] = []
+        self.tools_schema: list[dict] = []
+        
+        # Variables para tracking de tokens de la sesión
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+
+    def set_provider(self, provider: str) -> None:
+        """Configura o cambia el proveedor de LLM actual."""
+        self.provider = provider
         if provider == "vpn":
             # GitHub Models — requiere VPN con Zscaler (usa truststore para el certificado corporativo)
             ssl_ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -599,6 +613,7 @@ class TrainerAgent:
                 http_client=http_client,
             )
             self.model = os.environ.get("GITHUB_MODEL", "gpt-4o-mini")
+            self._api_key = os.environ["GITHUB_TOKEN"]
         elif provider == "groq":
             # Groq — gratuito, sin VPN, 100k tokens/día
             # Registro en https://console.groq.com
@@ -607,11 +622,13 @@ class TrainerAgent:
                 api_key=os.environ["GROQ_API_KEY"],
             )
             self.model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+            self._api_key = os.environ["GROQ_API_KEY"]
         elif provider == "gemini":
             # API nativa de Gemini con x-goog-api-key (soporta claves AQ.)
             _gemini_key = os.environ["GEMINI_API_KEY"]
             self.client = _GeminiClient(api_key=_gemini_key)
             self.model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+            self._api_key = _gemini_key
         elif provider == "mistral":
             # Mistral La Plateforme — API compatible OpenAI, capa gratuita generosa
             # Registro en https://console.mistral.ai
@@ -620,6 +637,7 @@ class TrainerAgent:
                 api_key=os.environ["MISTRAL_API_KEY"],
             )
             self.model = os.environ.get("MISTRAL_MODEL", "mistral-small-latest")
+            self._api_key = os.environ["MISTRAL_API_KEY"]
         elif provider == "cerebras":
             # Cerebras — inferencia ultrarrápida, API compatible OpenAI, capa gratuita
             # Registro en https://cloud.cerebras.ai
@@ -628,15 +646,9 @@ class TrainerAgent:
                 api_key=os.environ["CEREBRAS_API_KEY"],
             )
             self.model = os.environ.get("CEREBRAS_MODEL", "llama-3.3-70b")
+            self._api_key = os.environ["CEREBRAS_API_KEY"]
         else:
             raise ValueError(f"Proveedor desconocido: '{provider}'. Opciones válidas: 'vpn', 'groq', 'gemini', 'mistral', 'cerebras'.")
-        self.mcp_session = mcp_session
-        # GitHub Models (vpn) tiene limite de ~8000 tokens en el request;
-        # usamos el prompt compacto para dejar espacio a tools + contexto.
-        self.system_prompt = _load_system_prompt(compact=(provider == "vpn"))
-        self.user_profile = _load_user_profile()
-        self.conversation_history: list[dict] = []
-        self.tools_schema: list[dict] = []
         
         # Variables para tracking de tokens de la sesión
         self.total_prompt_tokens = 0
@@ -732,19 +744,33 @@ class TrainerAgent:
 
         return result
 
-    def get_gemini_daily_info(self) -> dict:
-        """Devuelve información sobre el uso diario de tokens de Gemini."""
-        api_key      = os.environ.get("GEMINI_API_KEY", "")
-        today_usage  = get_gemini_daily_usage(api_key)
-        is_exhausted = _storage.is_gemini_quota_exhausted(api_key)
-        limit        = 1_000_000
+    def get_daily_usage_info(self) -> dict:
+        """Devuelve información sobre el uso diario de tokens del proveedor actual."""
+        api_key = getattr(self, "_api_key", "")
+        today_usage = get_gemini_daily_usage(api_key) if api_key else 0
+        is_exhausted = _storage.is_gemini_quota_exhausted(api_key) if api_key else False
+
+        # Límites diarios de tokens definidos por defecto o por estimación razonable
+        limits = {
+            "gemini": 1_000_000,
+            "groq": 100_000,
+            "vpn": 100_000,         # GitHub Models
+            "mistral": 10_000_000,  # Capa gratuita muy generosa
+            "cerebras": 1_000_000
+        }
+        limit = limits.get(self.provider, 1_000_000)
+
         return {
             "today_usage":     today_usage,
             "limit":           limit,
             "remaining":       max(0, limit - today_usage),
             "has_key":         bool(api_key),
-            "quota_exhausted": is_exhausted or today_usage >= limit,
+            "quota_exhausted": is_exhausted or (today_usage >= limit if limit else False),
         }
+
+    def get_gemini_daily_info(self) -> dict:
+        """Devuelve información sobre el uso diario de tokens de Gemini (mantenido por compatibilidad)."""
+        return self.get_daily_usage_info()
 
     def _build_system_prompt(self) -> str:
         """Construye el system prompt incluyendo la fecha actual y el perfil del usuario."""
@@ -836,13 +862,26 @@ class TrainerAgent:
                 )
             except Exception as api_exc:
                 err_str = str(api_exc)
+                
+                # Detectar si la clave ha agotado recursos o cuota y marcarlo en la BBDD
+                is_quota_exhausted = (
+                    "RESOURCE_EXHAUSTED" in err_str
+                    or "quota_exceeded" in err_str
+                    or "insufficient_quota" in err_str
+                    or "limit_exceeded" in err_str
+                    or ("quota" in err_str.lower() and "rate" not in err_str.lower())
+                )
+                if is_quota_exhausted and getattr(self, "_api_key", None):
+                    from agent.storage import mark_gemini_quota_exhausted
+                    mark_gemini_quota_exhausted(self._api_key)
+                
                 if "413" in err_str or "tokens_limit_reached" in err_str or "Request body too large" in err_str:
                     msg = (
                         "La consulta es demasiado extensa para el modelo actual (límite de tokens del proveedor).\n\n"
                         "Prueba con una de estas opciones:\n"
                         "- Haz una pregunta más específica y acotada (ej: *¿Cómo estoy hoy?* en lugar de *analiza 8 semanas*)\n"
                         "- Divide el análisis en pasos: primero métricas de hoy, luego tendencias, luego plan\n"
-                        "- Si no estás en red corporativa, reinicia el agente (usará Gemini con contexto ilimitado)"
+                        "- Si no estás en red corporativa, reinicia el agente o usa /modelo para cambiar a un modelo con contexto más grande (como Gemini)"
                     )
                     self.conversation_history.append({"role": "user", "content": user_message})
                     self.conversation_history.append({"role": "assistant", "content": msg})
@@ -858,7 +897,10 @@ class TrainerAgent:
                 c_toks = getattr(u, "completion_tokens", 0) or 0
                 self.total_prompt_tokens += p_toks
                 self.total_completion_tokens += c_toks
-                print(f"  [debug] Tokens - Entrada: {p_toks} | Salida: {c_toks} | Total paso: {p_toks + c_toks}")
+                total_step_tokens = p_toks + c_toks
+                print(f"  [debug] Tokens - Entrada: {p_toks} | Salida: {c_toks} | Total paso: {total_step_tokens}")
+                if getattr(self, "_api_key", None):
+                    update_gemini_daily_usage(self._api_key, total_step_tokens)
 
             message = response.choices[0].message
 
@@ -938,6 +980,12 @@ class TrainerAgent:
                 model=self.model,
                 messages=[{"role": "user", "content": summary_prompt}],
             )
+            # Track and update token usage for OpenAI keys
+            if getattr(response, "usage", None) and getattr(self, "_api_key", None):
+                u = response.usage
+                p_toks = getattr(u, "prompt_tokens", 0) or 0
+                c_toks = getattr(u, "completion_tokens", 0) or 0
+                update_gemini_daily_usage(self._api_key, p_toks + c_toks)
             return (response.choices[0].message.content or "").strip()
         except Exception:
             # Fallback: resumen básico con los temas del usuario
