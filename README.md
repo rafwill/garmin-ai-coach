@@ -8,16 +8,16 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
 
 ## ✨ Características clave
 
-* **🧠 Cinco proveedores de IA (todos gratuitos salvo VPN):**
+* **🧠 Cinco proveedores de IA:**
   | # | Opción | Modelo | Límite gratuito | Requiere |
   |---|--------|--------|-----------------|----------|
-  | 1 | **GitHub Models** | `gpt-4o-mini` | — | GitHub token + VPN |
-  | 2 | **Groq** | `llama-3.3-70b-versatile` | 100k tokens/día | API key gratuita |
-  | 3 | **Google Gemini** | `gemini-2.0-flash` | ~1M tokens/día | API key gratuita |
-  | 4 | **Mistral** *(recomendado)* | `mistral-small-latest` | ~1B tokens/mes | API key gratuita |
-  | 5 | **Cerebras** | `llama-3.3-70b` | generoso | API key gratuita |
+  | 1 | **Google Gemini** | `gemini-2.0-flash` | ~1M tokens/día | API key gratuita |
+  | 2 | **Mistral** | `mistral-small-latest` | ~1B tokens/mes | API key gratuita |
+  | 3 | **Groq** | `llama-3.3-70b-versatile` | 100k tokens/día | API key gratuita |
+  | 4 | **Cerebras** | `llama-3.3-70b` | generoso | API key gratuita |
+  | 5 | **GitHub Models** | `gpt-4o-mini` | — | GitHub token + VPN |
 
-  La red se **detecta automáticamente**: dentro de VPN corporativa (Zscaler) usa GitHub Models; fuera selecciona el mejor proveedor libre disponible.
+  La red se **detecta automáticamente**: dentro de VPN corporativa (Zscaler) usa GitHub Models de forma directa; fuera, te despliega un **menú interactivo** para que selecciones el modelo que quieras usar y te permite **cambiar de modelo en caliente** en cualquier momento del chat con el comando `/modelo`.
 
 * **⌚ Herramientas de Garmin Connect:**
   - Actividades, zonas FC, splits, progreso, récords personales
@@ -141,6 +141,7 @@ A continuación se selecciona el modo de herramientas y el agente conecta con Ga
 |---------|-------------|
 | `/ayuda` · `/help` · `/?` | Muestra ejemplos de preguntas, todos los comandos y guía de indicadores |
 | `/perfil` | Muestra el perfil actual (datos personales + objetivos + salud) |
+| `/modelo` · `/model` | Muestra estadísticas de tokens y te permite **cambiar de modelo de IA en caliente** sin perder la sesión |
 | `/perfil editar` | Edita todos los campos del perfil |
 | `/perfil editar objetivo` | Edita solo los objetivos de entrenamiento |
 | `/perfil editar salud` | Edita solo los datos de salud |
