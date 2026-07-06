@@ -18,6 +18,7 @@
 | 11 | **Comando `/ayuda`** — ejemplos de preguntas, lista de comandos y guía rápida de indicadores (Body Battery, Readiness, HRV, Training Status) |
 | 7  | **Tests automatizados** — 93 tests, 0 fallos. `tests/test_trainer_agent.py` (funciones puras + Gemini mock) y `tests/test_main.py` (validaciones + identidad) |
 | 1B | **Supabase** — `agent/storage.py` unifica la persistencia: Supabase como primario (3 tablas: `user_profile`, `session_context`, `gemini_usage`) + fallback automático a JSON local si no está configurado. `supabase/schema.sql` listo para ejecutar. |
+| 14 | **Formatear salida Coach** — salida normalizada a Markdown estructurado (secciones, tablas y emojis): reglas añadidas en `prompts/system_prompt*.md` y fallback en `agent/main.py` para convertir texto plano a formato legible en terminal/Telegram/email. |
 
 ---
 
@@ -122,5 +123,11 @@ Aprovechar `get_body_composition` para guardar localmente el peso de cada sesió
 - API keys LLM: valorar guardar solo el hash para tracking de cuota, nunca el valor real en BD
 - Row Level Security (RLS) de Supabase para aislar datos por `garmin_user_id`
 
-## 🗃️ 14. Formatear salida Coach
-Ahora mismo lo saca todo en texto plano. Mejorar la presentación con Markdown, tablas y emojis para que sea más legible en Telegram o email.
+## ~~🗃️ 14. Formatear salida Coach~~ ✅ Completado
+Salida normalizada con dos capas:
+- **Capa de instrucción**: reglas de formato obligatorio en `system_prompt.md` y `system_prompt_compact.md`.
+- **Capa de seguridad**: fallback `_format_coach_markdown()` en `agent/main.py` para envolver respuestas en texto plano y convertir multilínea a bullets Markdown.
+
+
+## 15. Refactorizar la aplicación
+La apicación quiero que sirva como un entrenador. Quiero que se comporte como un entrenador personal, que pueda dar consejos, motivación y seguimiento de los entrenamientos. Para ello, se necesita un refactor completo del código para separar la lógica de negocio, la interfaz de usuario y la comunicación con Garmin y LLMs. Esto permitirá añadir nuevas funcionalidades más fácilmente y mantener el código limpio y mantenible. Se necesitaria un architectura basada en capas, con una capa de presentación (interfaz de usuario), una capa de negocio (lógica del entrenador) y una capa de datos (comunicación con Garmin y LLMs). Además, se debería implementar un sistema de pruebas unitarias y de integración para asegurar la calidad del código. Se necesitarian varios agentes especializados, uno para la comunicación con Garmin, otro para la comunicación con LLMs y otro para la lógica del entrenador. Cada agente debería tener su propia interfaz y ser capaz de comunicarse con los demás agentes de manera eficiente. Uno de los agentes tendrá como fuente de información un fichero de datos sobre la persona entrenada. Ese fichero contendrá información sobre el perfil del usuario, sus objetivos, su historial de entrenamientos y cualquier otra información relevante para el entrenador como patologias. El agente encargado de la lógica del entrenador utilizará esta información para generar recomendaciones personalizadas y motivación para el usuario (esto anula el fichero de settings.json). También se debería implementar un sistema de seguimiento de objetivos, donde el usuario pueda establecer metas a corto y largo plazo y recibir retroalimentación sobre su progreso hacia esas metas. Además, se debería permitir al usuario registrar sus entrenamientos y ver estadísticas detalladas sobre su rendimiento, incluyendo gráficos y análisis de tendencias. 

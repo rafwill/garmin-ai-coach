@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from agent.main import (
+    _format_coach_markdown,
     _garmin_user_id,
     _is_first_time,
     _validate_date,
@@ -249,3 +250,24 @@ class TestIsFirstTime:
             }):
                 # setup_complete=False → siempre True
                 assert _is_first_time() is True
+
+
+# ─── _format_coach_markdown ────────────────────────────────────────────────
+
+class TestFormatCoachMarkdown:
+    def test_keeps_existing_markdown(self):
+        md = "## Resumen\n\n| Métrica | Valor |\n|---|---|\n| HRV | 56 |"
+        out = _format_coach_markdown(md)
+        assert out == md
+
+    def test_wraps_single_plain_line(self):
+        out = _format_coach_markdown("Hoy estás recuperado y listo para entrenar.")
+        assert out.startswith("## 🧭 Resumen del Coach")
+        assert "Hoy estás recuperado" in out
+
+    def test_converts_plain_multiline_to_bullets(self):
+        out = _format_coach_markdown("Readiness alta\nBody Battery 82\nSueño sólido")
+        assert out.startswith("## 🧭 Resumen del Coach")
+        assert "- Readiness alta" in out
+        assert "- Body Battery 82" in out
+        assert "- Sueño sólido" in out

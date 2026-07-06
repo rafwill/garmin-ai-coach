@@ -346,6 +346,29 @@ def _show_help() -> None:
     ))
 
 
+def _format_coach_markdown(response: str) -> str:
+    """Normaliza la salida del coach a Markdown legible para terminal/email/Telegram.
+
+    Si el modelo responde en texto plano, envuelve el contenido con un encabezado
+    y convierte líneas sueltas en bullets para mejorar la lectura.
+    """
+    text = (response or "").strip()
+    if not text:
+        return "## 🧭 Resumen del Coach\n\n_No he podido generar contenido en esta respuesta._"
+
+    markdown_markers = ("## ", "### ", "|", "**", "\n1. ", "- ", "* ")
+    if any(marker in text for marker in markdown_markers):
+        return text
+
+    lines = [line.strip(" \t-•") for line in text.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        body = lines[0] if lines else text
+        return f"## 🧭 Resumen del Coach\n\n{body}"
+
+    bullet_block = "\n".join(f"- {line}" for line in lines)
+    return f"## 🧭 Resumen del Coach\n\n{bullet_block}"
+
+
 console = Console()
 
 
@@ -757,7 +780,7 @@ async def main() -> None:
                 with console.status("[bold green]GarminCoach está analizando tus datos...[/]"):
                     response = await agent.chat(user_input)
                 console.print(f"\n[bold green]GarminCoach[/]")
-                console.print(Markdown(response))
+                console.print(Markdown(_format_coach_markdown(response)))
             except Exception as e:
                 console.print(f"\n[bold red]Error en el Agente:[/] {e}")
 
