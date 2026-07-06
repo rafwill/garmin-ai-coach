@@ -5,6 +5,7 @@ de Garmin Connect a través del servidor MCP.
 """
 
 import os
+import logging
 import ssl
 import json
 import asyncio
@@ -647,8 +648,17 @@ class TrainerAgent:
             )
             self.model = os.environ.get("CEREBRAS_MODEL", "llama-3.3-70b")
             self._api_key = os.environ["CEREBRAS_API_KEY"]
+        elif provider == "nvidia":
+            # NVIDIA NIM — API compatible con OpenAI
+            # Docs: https://build.nvidia.com/explore/discover
+            self.client = AsyncOpenAI(
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key=os.environ["NVIDIA_API_KEY"],
+            )
+            self.model = os.environ.get("NVIDIA_MODEL", "meta/llama-3.1-70b-instruct")
+            self._api_key = os.environ["NVIDIA_API_KEY"]
         else:
-            raise ValueError(f"Proveedor desconocido: '{provider}'. Opciones válidas: 'vpn', 'groq', 'gemini', 'mistral', 'cerebras'.")
+            raise ValueError(f"Proveedor desconocido: '{provider}'. Opciones válidas: 'vpn', 'groq', 'gemini', 'mistral', 'cerebras', 'nvidia'.")
         
         # Variables para tracking de tokens de la sesión
         self.total_prompt_tokens = 0
@@ -756,7 +766,8 @@ class TrainerAgent:
             "groq": 100_000,
             "vpn": 100_000,         # GitHub Models
             "mistral": 10_000_000,  # Capa gratuita muy generosa
-            "cerebras": 1_000_000
+            "cerebras": 1_000_000,
+            "nvidia": 1_000_000      # Límite por defecto, NVIDIA usa rate limits
         }
         limit = limits.get(self.provider, 1_000_000)
 

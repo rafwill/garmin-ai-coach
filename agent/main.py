@@ -11,6 +11,24 @@ import re
 import sys
 from datetime import date
 from pathlib import Path
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("agent.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+
+# Forzar encoding UTF-8 para evitar errores de Unicode en Windows
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
 import httpx
 from dotenv import load_dotenv
@@ -337,6 +355,7 @@ _PROVIDER_INFO = {
     "gemini":   ("GEMINI_API_KEY",   "Google Gemini (gemini-2.0-flash)",    "~1M tokens/día gratis"),
     "mistral":  ("MISTRAL_API_KEY",  "Mistral (mistral-small-latest)",      "capa gratuita · console.mistral.ai"),
     "cerebras": ("CEREBRAS_API_KEY", "Cerebras (llama-3.3-70b)",            "ultrarrápido · gratis · cloud.cerebras.ai"),
+    "nvidia":   ("NVIDIA_API_KEY",   "NVIDIA NIM (llama3-70b-instruct)",    "API compatible OpenAI · build.nvidia.com"),
 }
 
 
@@ -361,6 +380,7 @@ def _check_env(provider: str) -> None:
             "GITHUB_TOKEN":    "https://github.com/settings/tokens",
             "MISTRAL_API_KEY": "https://console.mistral.ai  → API Keys",
             "CEREBRAS_API_KEY": "https://cloud.cerebras.ai  → API Keys",
+            "NVIDIA_API_KEY":   "https://build.nvidia.com/explore/discover",
         }
         for m in missing:
             if m in hints:
@@ -397,6 +417,7 @@ def _best_available_provider() -> str | None:
         ("mistral",  "MISTRAL_API_KEY"),
         ("groq",     "GROQ_API_KEY"),
         ("cerebras", "CEREBRAS_API_KEY"),
+        ("nvidia",   "NVIDIA_API_KEY"),
     ]
     for name, env_var in candidates:
         val = os.environ.get(env_var, "")
@@ -420,6 +441,7 @@ def _select_provider_menu(on_vpn: bool) -> str:
         ("mistral",  "MISTRAL_API_KEY"),
         ("groq",     "GROQ_API_KEY"),
         ("cerebras", "CEREBRAS_API_KEY"),
+        ("nvidia",   "NVIDIA_API_KEY"),
     ]
     available = []
     for name, env_var in candidates:

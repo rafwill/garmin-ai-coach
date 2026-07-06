@@ -122,3 +122,5 @@ Aprovechar `get_body_composition` para guardar localmente el peso de cada sesió
 - API keys LLM: valorar guardar solo el hash para tracking de cuota, nunca el valor real en BD
 - Row Level Security (RLS) de Supabase para aislar datos por `garmin_user_id`
 
+## 🗃️ 14. Formatear salida Coach
+Ahora mismo lo saca todo en texto plano. Mejorar la presentación con Markdown, tablas y emojis para que sea más legible en Telegram o email.

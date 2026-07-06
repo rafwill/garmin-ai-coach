@@ -8,14 +8,15 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
 
 ## ✨ Características clave
 
-* **🧠 Cinco proveedores de IA:**
+* **🧠 Seis proveedores de IA:**
   | # | Opción | Modelo | Límite gratuito | Requiere |
   |---|--------|--------|-----------------|----------|
   | 1 | **Google Gemini** | `gemini-2.0-flash` | ~1M tokens/día | API key gratuita |
   | 2 | **Mistral** | `mistral-small-latest` | ~1B tokens/mes | API key gratuita |
   | 3 | **Groq** | `llama-3.3-70b-versatile` | 100k tokens/día | API key gratuita |
   | 4 | **Cerebras** | `llama-3.3-70b` | generoso | API key gratuita |
-  | 5 | **GitHub Models** | `gpt-4o-mini` | — | GitHub token + VPN |
+  | 5 | **NVIDIA NIM** | `llama3-70b-instruct` | generoso | API key gratuita |
+  | 6 | **GitHub Models** | `gpt-4o-mini` | — | GitHub token + VPN |
 
   La red se **detecta automáticamente**: dentro de VPN corporativa (Zscaler) usa GitHub Models de forma directa; fuera, te despliega un **menú interactivo** para que selecciones el modelo que quieras usar y te permite **cambiar de modelo en caliente** en cualquier momento del chat con el comando `/modelo`.
 
@@ -131,6 +132,7 @@ El agente descargará automáticamente el servidor MCP en el primer arranque (v�
   3 · Google Gemini (gemini-2.0-flash)      — ~1M tokens/día gratis
   4 · Mistral      (mistral-small)          — gratis · function calling nativo  ← recomendado
   5 · Cerebras     (llama-3.3-70b)          — ultrarrápido · gratis
+  6 · NVIDIA NIM   (llama3-70b-instruct)    — gratis · API compatible OpenAI
 ```
 
 A continuación se selecciona el modo de herramientas y el agente conecta con Garmin Connect.
