@@ -10,6 +10,7 @@ import ssl
 import json
 import asyncio
 import hashlib
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -254,6 +255,20 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
         # Procesado específico para récords personales
         if tool_name == "get_personal_records" and isinstance(data, list):
             return _compact_personal_records(data)
+        # Añadir campos normalizados útiles para análisis de actividades
+        if tool_name == "get_activity" and isinstance(data, dict):
+            duration = data.get("duration") or data.get("movingDuration")
+            distance = data.get("distance")
+            try:
+                if duration is not None:
+                    data["duration_hhmmss"] = _seconds_to_hhmmss(float(duration))
+            except (ValueError, TypeError):
+                pass
+            try:
+                if distance is not None:
+                    data["distance_km"] = round(float(distance) / 1000, 2)
+            except (ValueError, TypeError):
+                pass
         if isinstance(data, list):
             data = data[:8]  # máximo 8 elementos de arrays
             data = [
@@ -552,6 +567,21 @@ class _GeminiClient:
 # Palabras clave de fecha que algunos LLMs envían en lugar de fechas ISO
 _TODAY_KEYWORDS = {"hoy", "today", "今日", "今天", "ahora", "now", "current", "actual", "este dia"}
 _YESTERDAY_KEYWORDS = {"ayer", "yesterday", "昨日", "昨天"}
+_MONTHS_ES = {
+    "enero": 1,
+    "febrero": 2,
+    "marzo": 3,
+    "abril": 4,
+    "mayo": 5,
+    "junio": 6,
+    "julio": 7,
+    "agosto": 8,
+    "septiembre": 9,
+    "setiembre": 9,
+    "octubre": 10,
+    "noviembre": 11,
+    "diciembre": 12,
+}
 
 
 def _normalize_date_args(arguments: dict) -> dict:
@@ -578,6 +608,151 @@ def _normalize_date_args(arguments: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
+def _extract_iso_date_from_text(value: str) -> str | None:
+    """Extrae una fecha ISO YYYY-MM-DD desde texto libre en español/inglés."""
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip().lower()
+    if not text:
+        return None
+
+    if text in _TODAY_KEYWORDS:
+        return date.today().isoformat()
+    if text in _YESTERDAY_KEYWORDS:
+        return (date.today() - timedelta(days=1)).isoformat()
+
+    # yyyy-mm-dd
+    m_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+    if m_iso:
+        try:
+            return date.fromisoformat(m_iso.group(1)).isoformat()
+        except ValueError:
+            pass
+
+    # dd/mm/yyyy o dd-mm-yyyy
+    m_slash = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b", text)
+    if m_slash:
+        d, mth, y = int(m_slash.group(1)), int(m_slash.group(2)), int(m_slash.group(3))
+        try:
+            return date(y, mth, d).isoformat()
+        except ValueError:
+            pass
+
+    # 2 de julio de 2026 / 2 julio 2026 / 2 de julio
+    m_month = re.search(
+        r"\b(\d{1,2})\s*(?:de\s+)?([a-záéíóúñ]+)\s*(?:de\s*)?(\d{4})?\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m_month:
+        d = int(m_month.group(1))
+        month_name = (
+            m_month.group(2)
+            .replace("á", "a")
+            .replace("é", "e")
+            .replace("í", "i")
+            .replace("ó", "o")
+            .replace("ú", "u")
+        )
+        mth = _MONTHS_ES.get(month_name)
+        if mth:
+            y = int(m_month.group(3)) if m_month.group(3) else date.today().year
+            try:
+                return date(y, mth, d).isoformat()
+            except ValueError:
+                return None
+
+    return None
+
+
+def _extract_activity_date_iso(activity: dict) -> str | None:
+    """Obtiene la fecha ISO de una actividad Garmin a partir de sus campos de inicio."""
+    if not isinstance(activity, dict):
+        return None
+
+    for key in ("startTimeLocal", "startTimeGMT", "startTimeUTC", "startTime", "calendarDate"):
+        value = activity.get(key)
+        if isinstance(value, str) and len(value) >= 10:
+            date_str = value[:10]
+            try:
+                return date.fromisoformat(date_str).isoformat()
+            except ValueError:
+                continue
+    return None
+
+
+async def _find_activity_id_by_date(mcp_session: ClientSession, target_date_iso: str) -> int | None:
+    """Busca en actividades recientes el activity_id correspondiente a una fecha ISO."""
+    start = 0
+    limit = 100
+    max_pages = 6  # hasta 600 actividades recientes
+
+    for _ in range(max_pages):
+        raw = await call_tool(mcp_session, "get_activities", {"start": str(start), "limit": str(limit)})
+        data = json.loads(raw) if raw and raw.strip().startswith("{") else {}
+        activities = data.get("activities", []) if isinstance(data, dict) else []
+
+        for activity in activities:
+            if _extract_activity_date_iso(activity) != target_date_iso:
+                continue
+
+            activity_id = activity.get("activityId") or activity.get("activity_id") or activity.get("id")
+            try:
+                return int(activity_id)
+            except (TypeError, ValueError):
+                continue
+
+        has_more = bool(data.get("has_more")) if isinstance(data, dict) else False
+        if not has_more:
+            break
+        start = int(data.get("next_start", start + limit))
+
+    return None
+
+
+async def _normalize_get_activity_args(mcp_session: ClientSession, arguments: dict) -> dict:
+    """Normaliza argumentos de get_activity.
+
+    Acepta activity_id numérico o fechas en lenguaje natural/ISO y resuelve el
+    ID automáticamente consultando get_activities cuando sea necesario.
+    """
+    if not isinstance(arguments, dict):
+        return {}
+
+    args = dict(arguments)
+    candidate = args.get("activity_id")
+    if candidate is None:
+        candidate = args.get("activityId")
+    if candidate is None:
+        candidate = args.get("id")
+    if candidate is None:
+        candidate = args.get("date")
+
+    # ID ya numérico
+    if isinstance(candidate, (int, float)):
+        return {"activity_id": int(candidate)}
+    if isinstance(candidate, str) and candidate.strip().isdigit():
+        return {"activity_id": int(candidate.strip())}
+
+    # Intentar resolver fecha -> activity_id
+    if isinstance(candidate, str):
+        target_date = _extract_iso_date_from_text(candidate)
+        if target_date:
+            resolved_id = await _find_activity_id_by_date(mcp_session, target_date)
+            if resolved_id is not None:
+                return {"activity_id": resolved_id}
+
+    # Fallback: mantener nombre esperado por la tool
+    if "activity_id" in args:
+        return {"activity_id": args["activity_id"]}
+    if "activityId" in args:
+        return {"activity_id": args["activityId"]}
+    if "id" in args:
+        return {"activity_id": args["id"]}
+    return args
 
 
 class TrainerAgent:
@@ -939,6 +1114,8 @@ class TrainerAgent:
                         arguments = {}
                     # Normalizar fechas: convertir palabras como 'hoy'/'ayer' a ISO
                     arguments = _normalize_date_args(arguments)
+                    if tool_name == "get_activity":
+                        arguments = await _normalize_get_activity_args(self.mcp_session, arguments)
 
                     print(f"  [debug] Ejecutando: {tool_name}({arguments})")
                     raw_result = await call_tool(

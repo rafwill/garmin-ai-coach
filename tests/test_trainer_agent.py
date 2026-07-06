@@ -21,7 +21,9 @@ from agent.trainer_agent import (
     _clean_schema_for_gemini,
     _compact_personal_records,
     _compact_tool_result,
+    _extract_iso_date_from_text,
     _GeminiCompletions,
+    _normalize_get_activity_args,
     _normalize_date_args,
     _seconds_to_hhmmss,
     _strip_garmin_object,
@@ -102,6 +104,19 @@ class TestNormalizeDateArgs:
         assert result["startDate"] == today
         assert result["endDate"]   == yesterday
         assert result["activityId"] == 123
+
+
+# ─── _extract_iso_date_from_text ────────────────────────────────────────────
+
+class TestExtractIsoDateFromText:
+    def test_extracts_iso(self):
+        assert _extract_iso_date_from_text("2026-07-02") == "2026-07-02"
+
+    def test_extracts_spanish_month_with_year(self):
+        assert _extract_iso_date_from_text("2 de julio de 2026") == "2026-07-02"
+
+    def test_extracts_dd_mm_yyyy(self):
+        assert _extract_iso_date_from_text("02/07/2026") == "2026-07-02"
 
 
 # ─── _strip_garmin_object ─────────────────────────────────────────────────────
@@ -203,6 +218,13 @@ class TestCompactToolResult:
         result_dict = json.loads(result)
         assert "startTimeGMT" not in result_dict
         assert result_dict["distance"] == 10000
+
+    def test_get_activity_adds_normalized_fields(self):
+        data = {"activityId": 123, "duration": 36612.18359375, "distance": 54428.41015625}
+        result = _compact_tool_result(json.dumps(data), tool_name="get_activity")
+        result_dict = json.loads(result)
+        assert result_dict["duration_hhmmss"] == "10:10:12"
+        assert result_dict["distance_km"] == 54.43
 
 
 # ─── _compact_personal_records ────────────────────────────────────────────────
@@ -400,3 +422,31 @@ class TestGeminiCompletionsParse:
 
         result = self._make_gemini()._parse(response)
         assert result.usage is None
+
+
+# ─── _normalize_get_activity_args ───────────────────────────────────────────
+
+class TestNormalizeGetActivityArgs:
+    @pytest.mark.asyncio
+    async def test_keeps_numeric_activity_id(self):
+        out = await _normalize_get_activity_args(MagicMock(), {"activity_id": "12345"})
+        assert out == {"activity_id": 12345}
+
+    @pytest.mark.asyncio
+    async def test_resolves_spanish_date_to_activity_id(self):
+        fake_response = json.dumps(
+            {
+                "start": 0,
+                "limit": 100,
+                "count": 2,
+                "has_more": False,
+                "next_start": 100,
+                "activities": [
+                    {"activityId": 111, "startTimeLocal": "2026-07-01T07:00:00.0"},
+                    {"activityId": 222, "startTimeLocal": "2026-07-02T07:30:15.0"},
+                ],
+            }
+        )
+        with patch("agent.trainer_agent.call_tool", return_value=fake_response):
+            out = await _normalize_get_activity_args(MagicMock(), {"activity_id": "2 de julio de 2026"})
+        assert out == {"activity_id": 222}
