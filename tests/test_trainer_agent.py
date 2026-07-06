@@ -18,11 +18,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.trainer_agent import (
+    _build_recovery_fallback_snapshot,
     _clean_schema_for_gemini,
     _compact_personal_records,
     _compact_tool_result,
     _extract_iso_date_from_text,
     _GeminiCompletions,
+    _is_no_data_result,
     _normalize_get_activity_args,
     _normalize_date_args,
     _seconds_to_hhmmss,
@@ -491,3 +493,42 @@ class TestNormalizeGetActivityArgs:
         with patch("agent.trainer_agent.call_tool", return_value=fake_response):
             out = await _normalize_get_activity_args(MagicMock(), {"activity_id": "actividad inventada"})
         assert out == {}
+
+
+# ─── Fallback de recuperación ───────────────────────────────────────────────
+
+class TestRecoveryFallback:
+    def test_is_no_data_result_true(self):
+        assert _is_no_data_result("No training readiness data found for 2026-07-03")
+
+    def test_is_no_data_result_false(self):
+        assert not _is_no_data_result('{"value":42}')
+
+    @pytest.mark.asyncio
+    async def test_build_recovery_fallback_snapshot_returns_payload(self):
+        async def _fake_call_tool(_session, tool_name, arguments):
+            if tool_name == "get_body_battery" and arguments.get("date") == "2026-07-03":
+                return '{"charged":72,"drained":28}'
+            return "No data found"
+
+        with patch("agent.trainer_agent.call_tool", side_effect=_fake_call_tool):
+            payload = await _build_recovery_fallback_snapshot(MagicMock(), "2026-07-03")
+
+        assert payload is not None
+        parsed = json.loads(payload)
+        assert parsed["fallback_reason"] == "training_readiness_unavailable"
+        assert "get_body_battery" in parsed["snapshot"]
+
+    @pytest.mark.asyncio
+    async def test_build_recovery_fallback_snapshot_handles_plain_text(self):
+        async def _fake_call_tool(_session, tool_name, arguments):
+            if tool_name == "get_body_battery" and arguments.get("date") == "2026-07-03":
+                return "Battery score: 58"
+            return "No data found"
+
+        with patch("agent.trainer_agent.call_tool", side_effect=_fake_call_tool):
+            payload = await _build_recovery_fallback_snapshot(MagicMock(), "2026-07-03")
+
+        assert payload is not None
+        parsed = json.loads(payload)
+        assert parsed["snapshot"]["get_body_battery"]["data"]["raw"] == "Battery score: 58"

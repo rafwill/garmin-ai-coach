@@ -610,6 +610,79 @@ def _normalize_date_args(arguments: dict) -> dict:
     return result
 
 
+def _is_no_data_result(raw_result: str | None) -> bool:
+    """Detecta respuestas de herramientas que indican ausencia de datos."""
+    if not raw_result:
+        return True
+    text = raw_result.strip().lower()
+    return (
+        "no" in text
+        and "data" in text
+        and ("found" in text or "available" in text)
+    )
+
+
+async def _build_recovery_fallback_snapshot(
+    mcp_session: ClientSession,
+    preferred_date_iso: str | None,
+) -> str | None:
+    """Construye un snapshot de recuperación cuando no hay training_readiness.
+
+    Intenta primero la fecha solicitada, y si no hay datos, prueba hoy y ayer.
+    """
+    dates_to_try: list[str] = []
+    if preferred_date_iso:
+        dates_to_try.append(preferred_date_iso)
+    today_iso = date.today().isoformat()
+    yesterday_iso = (date.today() - timedelta(days=1)).isoformat()
+    for candidate in (today_iso, yesterday_iso):
+        if candidate not in dates_to_try:
+            dates_to_try.append(candidate)
+
+    tools = [
+        "get_body_battery",
+        "get_hrv_data",
+        "get_sleep_summary",
+        "get_stress_summary",
+        "get_rhr_day",
+    ]
+
+    snapshot: dict[str, dict] = {}
+    for tool_name in tools:
+        for date_iso in dates_to_try:
+            try:
+                raw = await call_tool(mcp_session, tool_name, {"date": date_iso})
+            except Exception:
+                continue
+
+            if _is_no_data_result(raw):
+                continue
+
+            compact = _compact_tool_result(raw, tool_name)
+            try:
+                parsed_data = json.loads(compact)
+            except (TypeError, json.JSONDecodeError):
+                # Algunos endpoints devuelven texto plano; guardarlo también es útil
+                # para que el LLM no pierda contexto y evitar romper el flujo.
+                parsed_data = {"raw": compact}
+
+            snapshot[tool_name] = {
+                "date": date_iso,
+                "data": parsed_data,
+            }
+            break
+
+    if not snapshot:
+        return None
+
+    payload = {
+        "fallback_reason": "training_readiness_unavailable",
+        "summary": "Se usa un snapshot alternativo de recuperación (body battery, HRV, sueño, estrés, RHR).",
+        "snapshot": snapshot,
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def _extract_iso_date_from_text(value: str) -> str | None:
     """Extrae una fecha ISO YYYY-MM-DD desde texto libre en español/inglés."""
     if not isinstance(value, str):
@@ -1189,6 +1262,21 @@ class TrainerAgent:
                     raw_result = await call_tool(
                         self.mcp_session, tool_name, arguments
                     )
+
+                    # Si no hay training_readiness, enriquecer contexto con métricas de recuperación
+                    if (
+                        tool_name in {"get_training_readiness", "get_morning_training_readiness"}
+                        and _is_no_data_result(raw_result)
+                    ):
+                        requested_date = arguments.get("date") if isinstance(arguments, dict) else None
+                        fallback_snapshot = await _build_recovery_fallback_snapshot(
+                            self.mcp_session,
+                            requested_date if isinstance(requested_date, str) else None,
+                        )
+                        if fallback_snapshot:
+                            print("  [debug] Training readiness sin datos; usando snapshot alternativo de recuperación")
+                            raw_result = fallback_snapshot
+
                     tool_result = _compact_tool_result(raw_result, tool_name)
                     print(f"  [debug] Resultado ({len(raw_result or '')} → {len(tool_result)} chars): {tool_result[:150]}")
 
