@@ -15,10 +15,14 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
   | 2 | **Mistral** | `mistral-small-latest` | ~1B tokens/mes | API key gratuita |
   | 3 | **Groq** | `llama-3.3-70b-versatile` | 100k tokens/día | API key gratuita |
   | 4 | **Cerebras** | `llama-3.3-70b` | generoso | API key gratuita |
-  | 5 | **NVIDIA NIM** | `llama3-70b-instruct` | generoso | API key gratuita |
+  | 5 | **NVIDIA NIM** | `meta/llama-3.1-70b-instruct` | generoso | API key gratuita |
   | 6 | **GitHub Models** | `gpt-4o-mini` | — | GitHub token + VPN |
 
   La red se **detecta automáticamente**: dentro de VPN corporativa (Zscaler) usa GitHub Models de forma directa; fuera, te despliega un **menú interactivo** para que selecciones el modelo que quieras usar y te permite **cambiar de modelo en caliente** en cualquier momento del chat con el comando `/modelo`.
+
+* **🪵 Logging y compatibilidad Windows:**
+  - El agente escribe logs en `agent.log` con timestamps y nivel de severidad.
+  - En Windows, la salida de consola se fuerza a UTF-8 para evitar errores de Unicode.
 
 * **⌚ Herramientas de Garmin Connect:**
   - Actividades, zonas FC, splits, progreso, récords personales
@@ -208,6 +212,7 @@ garmin-ai-coach/
 │   └── test_main.py           # 39 tests: validaciones de input + lógica de identidad.
 ├── .env                   # Credenciales locales (no subir a git).
 ├── .env.example           # Plantilla de configuración con comentarios.
+├── agent.log              # Log de ejecución del agente (local, no versionar).
 ├── requirements.txt       # Dependencias de producción.
 ├── requirements-dev.txt   # Dependencias de desarrollo: pytest, pytest-asyncio.
 ├── pytest.ini             # Configuración de pytest.
