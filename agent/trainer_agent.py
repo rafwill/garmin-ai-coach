@@ -713,6 +713,60 @@ async def _find_activity_id_by_date(mcp_session: ClientSession, target_date_iso:
     return None
 
 
+async def _find_activity_id_by_name(mcp_session: ClientSession, name_hint: str) -> int | None:
+    """Busca activity_id por nombre aproximado en actividades recientes."""
+    hint = (name_hint or "").strip().lower()
+    if not hint:
+        return None
+
+    start = 0
+    limit = 100
+    max_pages = 6  # hasta 600 actividades recientes
+
+    for _ in range(max_pages):
+        raw = await call_tool(mcp_session, "get_activities", {"start": str(start), "limit": str(limit)})
+        data = json.loads(raw) if raw and raw.strip().startswith("{") else {}
+        activities = data.get("activities", []) if isinstance(data, dict) else []
+
+        best_id = None
+        best_score = -1
+        for activity in activities:
+            if not isinstance(activity, dict):
+                continue
+            name = str(activity.get("name", "")).strip().lower()
+            if not name:
+                continue
+
+            score = -1
+            # Coincidencias más fuertes primero
+            if name == hint:
+                score = 100
+            elif name.startswith(hint):
+                score = 90
+            elif hint in name:
+                score = 80
+            elif all(tok in name for tok in hint.split() if tok):
+                score = 70
+
+            if score > best_score:
+                activity_id = activity.get("activityId") or activity.get("activity_id") or activity.get("id")
+                try:
+                    best_id = int(activity_id)
+                    best_score = score
+                except (TypeError, ValueError):
+                    continue
+
+        if best_id is not None and best_score >= 70:
+            return best_id
+
+        has_more = bool(data.get("has_more")) if isinstance(data, dict) else False
+        if not has_more:
+            break
+        start = int(data.get("next_start", start + limit))
+
+    return None
+
+
 async def _normalize_get_activity_args(mcp_session: ClientSession, arguments: dict) -> dict:
     """Normaliza argumentos de get_activity.
 
@@ -744,14 +798,28 @@ async def _normalize_get_activity_args(mcp_session: ClientSession, arguments: di
             resolved_id = await _find_activity_id_by_date(mcp_session, target_date)
             if resolved_id is not None:
                 return {"activity_id": resolved_id}
+        # Si no es fecha, intentar resolver por nombre de actividad
+        resolved_id = await _find_activity_id_by_name(mcp_session, candidate)
+        if resolved_id is not None:
+            return {"activity_id": resolved_id}
 
-    # Fallback: mantener nombre esperado por la tool
+    # Fallback: mantener nombre esperado por la tool solo para valores numéricos.
+    # Evita enviar texto libre al backend (fallo: invalid literal for int()).
     if "activity_id" in args:
-        return {"activity_id": args["activity_id"]}
+        v = args["activity_id"]
+        if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().isdigit()):
+            return {"activity_id": int(v)}
+        return {}
     if "activityId" in args:
-        return {"activity_id": args["activityId"]}
+        v = args["activityId"]
+        if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().isdigit()):
+            return {"activity_id": int(v)}
+        return {}
     if "id" in args:
-        return {"activity_id": args["id"]}
+        v = args["id"]
+        if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().isdigit()):
+            return {"activity_id": int(v)}
+        return {}
     return args
 
 

@@ -450,3 +450,44 @@ class TestNormalizeGetActivityArgs:
         with patch("agent.trainer_agent.call_tool", return_value=fake_response):
             out = await _normalize_get_activity_args(MagicMock(), {"activity_id": "2 de julio de 2026"})
         assert out == {"activity_id": 222}
+
+    @pytest.mark.asyncio
+    async def test_resolves_activity_name_hint_to_activity_id(self):
+        fake_response = json.dumps(
+            {
+                "start": 0,
+                "limit": 100,
+                "count": 2,
+                "has_more": False,
+                "next_start": 100,
+                "activities": [
+                    {"activityId": 1001, "name": "Rodaje suave 8km", "startTimeLocal": "2026-07-03T07:00:00.0"},
+                    {
+                        "activityId": 2002,
+                        "name": "Ultra Trail. Hoka Val d'Aran Pyrenees by UTMB PDA 2026",
+                        "startTimeLocal": "2026-07-02T07:30:15.0",
+                    },
+                ],
+            }
+        )
+        with patch("agent.trainer_agent.call_tool", return_value=fake_response):
+            out = await _normalize_get_activity_args(MagicMock(), {"activity_id": "Ultra Trail. Hoka Val d"})
+        assert out == {"activity_id": 2002}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_args_for_unresolved_text_activity_id(self):
+        fake_response = json.dumps(
+            {
+                "start": 0,
+                "limit": 100,
+                "count": 1,
+                "has_more": False,
+                "next_start": 100,
+                "activities": [
+                    {"activityId": 3003, "name": "Paseo", "startTimeLocal": "2026-07-01T07:00:00.0"},
+                ],
+            }
+        )
+        with patch("agent.trainer_agent.call_tool", return_value=fake_response):
+            out = await _normalize_get_activity_args(MagicMock(), {"activity_id": "actividad inventada"})
+        assert out == {}
