@@ -249,30 +249,39 @@ class TestBuildEnrichedAthleteKnowledge:
 
 # ─── _ensure_garmin_credentials ────────────────────────────────────────────
 
+# ─── _ensure_garmin_credentials ────────────────────────────────────────────
+
 class TestEnsureGarminCredentials:
-    def test_reuses_app_password_when_strategy_same(self):
-        creds = {
-            "garmin_email": "runner@example.com",
-            "garmin_password_strategy": "same_as_app_password",
-        }
-        with patch("agent.main.update_user_credentials") as upd_mock, \
+    def test_uses_app_password_directly_sets_env(self):
+        """Con email ya guardado, app_password se pone en GARMIN_PASSWORD sin prompt."""
+        creds = {"garmin_email": "runner@example.com"}
+        captured_env = {}
+        with patch("agent.main.update_user_credentials"), \
+             patch("agent.main.encrypt_password", return_value="ENC"), \
              patch("agent.main.Prompt.ask") as prompt_mock, \
              patch.dict("os.environ", {}, clear=True):
             out = _ensure_garmin_credentials(creds, app_password="app-secret")
+            # Capturar dentro del contexto donde los env vars están activos
+            import os as _os
+            captured_env["pw"] = _os.environ.get("GARMIN_PASSWORD")
+            captured_env["email"] = _os.environ.get("GARMIN_EMAIL")
 
-        assert out["garmin_password"] == "app-secret"
+        assert captured_env["pw"] == "app-secret"
+        assert captured_env["email"] == "runner@example.com"
         assert prompt_mock.call_count == 0
-        upd_mock.assert_called_once()
 
-    def test_prompts_password_when_no_strategy_and_no_env(self):
-        creds = {"garmin_email": "runner@example.com"}
-        with patch("agent.main.update_user_credentials"), \
-             patch("agent.main.Prompt.ask", return_value="typed-secret") as prompt_mock, \
+    def test_prompts_email_when_missing(self):
+        """Sin email guardado, pide email por prompt y actualiza credenciales."""
+        creds = {}
+        with patch("agent.main.update_user_credentials") as upd_mock, \
+             patch("agent.main.encrypt_password", return_value="ENC"), \
+             patch("agent.main.Prompt.ask", return_value="nuevo@example.com") as prompt_mock, \
              patch.dict("os.environ", {}, clear=True):
-            out = _ensure_garmin_credentials(creds, app_password="")
+            out = _ensure_garmin_credentials(creds, app_password="secret")
 
-        assert out["garmin_password"] == "typed-secret"
+        assert out["garmin_email"] == "nuevo@example.com"
         prompt_mock.assert_called_once()
+        upd_mock.assert_called_once()
 
 
 # ─── _auto_select_provider ──────────────────────────────────────────────────

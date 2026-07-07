@@ -114,10 +114,73 @@ def _normalize_username(username: str) -> str:
 
 
 def _sanitize_credentials_for_storage(credentials: dict | None) -> dict:
-    """Elimina secretos que no deben persistirse en BBDD."""
+    """Elimina secretos en texto claro — solo se permite garmin_password_encrypted."""
     creds = dict(credentials or {})
     creds.pop("garmin_password", None)
+    creds.pop("garmin_password_strategy", None)
     return creds
+
+
+def _get_fernet():
+    """Devuelve instancia Fernet usando ENCRYPTION_KEY del entorno."""
+    from cryptography.fernet import Fernet
+    key = (os.environ.get("ENCRYPTION_KEY") or "").strip().encode()
+    if not key:
+        raise RuntimeError(
+            "ENCRYPTION_KEY no configurada en .env. "
+            "Genera una con: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
+    return Fernet(key)
+
+
+def encrypt_password(plaintext: str) -> str:
+    """Cifra una contraseña con Fernet (AES-128-CBC + HMAC-SHA256)."""
+    return _get_fernet().encrypt(plaintext.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_password(encrypted: str) -> str | None:
+    """Descifra una contraseña. Devuelve None si falla (clave cambiada o corrupto)."""
+    try:
+        from cryptography.fernet import InvalidToken
+        return _get_fernet().decrypt(encrypted.encode("utf-8")).decode("utf-8")
+    except Exception:
+        return None
+
+
+def find_user_by_username(username: str) -> dict | None:
+    """Busca un usuario por nombre. Devuelve la fila completa o None."""
+    uname = _normalize_username(username)
+    if not uname:
+        return None
+    try:
+        sb = _require_supabase()
+        res = sb.table("app_user").select("id,username,password_hash,credentials").eq("username", uname).limit(1).execute()
+        return res.data[0] if res.data else None
+    except Exception:
+        return None
+
+
+def update_app_user_password(username: str, new_password: str) -> dict:
+    """Actualiza hash y contraseña cifrada cuando el usuario cambia su password de Garmin Connect."""
+    uname = _normalize_username(username)
+    if not uname or not new_password or len(new_password) < 6:
+        return {"ok": False, "error": "Datos inválidos (mínimo 6 caracteres)"}
+    new_hash = _pbkdf2_hash(new_password)
+    try:
+        sb = _require_supabase()
+        row = find_user_by_username(uname)
+        creds = dict((row or {}).get("credentials") or {})
+        creds.pop("garmin_password", None)
+        creds.pop("garmin_password_strategy", None)
+        creds["garmin_password_encrypted"] = encrypt_password(new_password)
+        result = sb.table("app_user").update(
+            {"password_hash": new_hash, "credentials": creds}
+        ).eq("username", uname).execute()
+        if not result.data:
+            return {"ok": False, "error": "Usuario no encontrado"}
+        return {"ok": True, "error": None}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def _pbkdf2_hash(password: str, salt_hex: str | None = None) -> str:

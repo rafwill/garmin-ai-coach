@@ -56,11 +56,15 @@ from agent.trainer_agent import TrainerAgent, _load_user_profile, _save_user_pro
 from agent.storage import (
     authenticate_app_user,
     check_supabase_connection,
+    decrypt_password,
+    encrypt_password,
+    find_user_by_username,
     get_active_user,
     load_athlete_knowledge,
     register_app_user,
     save_athlete_knowledge,
     set_active_user,
+    update_app_user_password,
     update_user_credentials,
 )
 
@@ -229,7 +233,7 @@ def _build_enriched_athlete_knowledge(profile: dict, enrichment: dict) -> str:
 
 
 def _authenticate_or_register_user() -> tuple[str, dict, bool, str]:
-    """Flujo inicial de acceso: iniciar sesión o registrarse.
+    """Flujo inicial de acceso: auto-login si usuario existe, registro si no.
 
     Returns:
         (username, credentials, is_new_user, app_password)
@@ -242,49 +246,66 @@ def _authenticate_or_register_user() -> tuple[str, dict, bool, str]:
     ))
 
     while True:
-        mode = Prompt.ask(
-            "Selecciona una opción",
-            choices=["login", "nuevo"],
-            default="login",
-            show_choices=True,
-        )
-
         username = Prompt.ask("Usuario").strip().lower()
-        password = Prompt.ask("Password", password=True).strip()
-
-        if mode == "login":
-            result = authenticate_app_user(username, password)
-            if not result.get("ok"):
-                console.print(f"[red]✗[/] {result.get('error', 'No se pudo iniciar sesión')}")
-                continue
-            set_active_user(result.get("user_id"), username)
-            console.print(f"[green]✓[/] Sesión iniciada como [bold]{username}[/].")
-            return username, result.get("credentials") or {}, False, password
-
-        confirm = Prompt.ask("Repite la password", password=True).strip()
-        if confirm != password:
-            console.print("[red]✗[/] Las passwords no coinciden.")
+        if not username:
             continue
 
-        same_as_login = Prompt.ask(
-            "¿Usar este user/pass también para Garmin Connect?",
-            choices=["si", "no"],
-            default="no",
-        )
-        if same_as_login == "si":
-            default_email = username if "@" in username else ""
-            garmin_email = Prompt.ask("Email Garmin", default=default_email).strip()
-            garmin_password = password
-            garmin_password_strategy = "same_as_app_password"
-        else:
-            garmin_email = Prompt.ask("Email Garmin").strip()
-            garmin_password = Prompt.ask("Password Garmin", password=True).strip()
-            garmin_password_strategy = "manual"
+        # ── Comprobar si el usuario ya existe ─────────────────────────────
+        existing = find_user_by_username(username)
+
+        if existing:
+            # Usuario encontrado — intentar auto-login con contraseña cifrada
+            creds = dict(existing.get("credentials") or {})
+            encrypted_pw = creds.get("garmin_password_encrypted", "")
+            password = decrypt_password(encrypted_pw) if encrypted_pw else None
+
+            if password and _verify_password_for_login(password, existing.get("password_hash", "")):
+                set_active_user(existing["id"], username)
+                console.print(
+                    f"[green]✓[/] Usuario encontrado · Accediendo automáticamente como [bold]{username}[/]"
+                )
+                return username, creds, False, password
+
+            # Sin cifrado o clave cambiada: pedir contraseña manualmente
+            if encrypted_pw:
+                console.print("[yellow]⚠[/]  Necesitamos verificar tu contraseña (clave de cifrado cambiada).")
+            password = Prompt.ask("Password", password=True).strip()
+            result = authenticate_app_user(username, password)
+            if not result.get("ok"):
+                console.print(f"[red]✗[/] {result.get('error', 'Contraseña incorrecta')}")
+                continue
+
+            # Actualizar cifrado para el próximo arranque
+            creds = result.get("credentials") or {}
+            creds["garmin_password_encrypted"] = encrypt_password(password)
+            update_user_credentials(creds)
+            set_active_user(result["user_id"], username)
+            console.print(f"[green]✓[/] Sesión iniciada como [bold]{username}[/].")
+            return username, creds, False, password
+
+        # ── Usuario nuevo: registro ────────────────────────────────────────
+        console.print(Panel.fit(
+            "[bold yellow]⚠ Importante — contraseña única[/]\n\n"
+            "Tu contraseña de [bold]GarminCoach[/] debe ser la misma que usas\n"
+            "en [bold]Garmin Connect[/]. Así podrás acceder sin volver a pedirla.\n\n"
+            "Si en el futuro cambias tu contraseña en Garmin Connect,\n"
+            "el sistema te pedirá actualizarla aquí también.",
+            title="[bold]Registro nuevo usuario[/]",
+            border_style="yellow",
+        ))
+
+        password = Prompt.ask("Contraseña (la misma que en Garmin Connect)", password=True).strip()
+        confirm = Prompt.ask("Repite la contraseña", password=True).strip()
+        if confirm != password:
+            console.print("[red]✗[/] Las contraseñas no coinciden.")
+            continue
+
+        default_email = username if "@" in username else ""
+        garmin_email = Prompt.ask("Email de Garmin Connect", default=default_email).strip()
 
         credentials = {
             "garmin_email": garmin_email,
-            "garmin_password": garmin_password,
-            "garmin_password_strategy": garmin_password_strategy,
+            "garmin_password_encrypted": encrypt_password(password),
         }
         create = register_app_user(username, password, credentials=credentials)
         if not create.get("ok"):
@@ -296,33 +317,58 @@ def _authenticate_or_register_user() -> tuple[str, dict, bool, str]:
         return username, credentials, True, password
 
 
+def _verify_password_for_login(password: str, stored_hash: str) -> bool:
+    """Wrapper para verificar password sin exponer _verify_password de storage."""
+    from agent.storage import _verify_password
+    return _verify_password(password, stored_hash)
+
+
 def _ensure_garmin_credentials(credentials: dict, app_password: str = "") -> dict:
-    """Asegura credenciales Garmin para el usuario activo y las deja en entorno."""
+    """Pone GARMIN_EMAIL y GARMIN_PASSWORD en el entorno para el proceso MCP."""
     credentials = dict(credentials or {})
     garmin_email = (credentials.get("garmin_email") or "").strip()
-    garmin_password = (credentials.get("garmin_password") or "").strip()
-    strategy = (credentials.get("garmin_password_strategy") or "").strip()
 
     if not garmin_email:
-        garmin_email = Prompt.ask("Email Garmin Connect", default=os.environ.get("GARMIN_EMAIL", "")).strip()
+        garmin_email = Prompt.ask(
+            "Email Garmin Connect",
+            default=os.environ.get("GARMIN_EMAIL", ""),
+        ).strip()
+        credentials["garmin_email"] = garmin_email
+        credentials["garmin_password_encrypted"] = encrypt_password(app_password)
+        update_user_credentials(credentials)
 
-    if not garmin_password and strategy == "same_as_app_password" and app_password:
-        garmin_password = app_password
-
-    if not garmin_password:
-        # Último fallback: si hay GARMIN_PASSWORD en entorno (p. ej. .env), reutilizarla.
-        garmin_password = (os.environ.get("GARMIN_PASSWORD") or "").strip()
-
-    if not garmin_password:
-        garmin_password = Prompt.ask("Password Garmin Connect", password=True).strip()
-
-    credentials["garmin_email"] = garmin_email
-    credentials["garmin_password"] = garmin_password
+    garmin_password = app_password or os.environ.get("GARMIN_PASSWORD", "")
 
     os.environ["GARMIN_EMAIL"] = garmin_email
     os.environ["GARMIN_PASSWORD"] = garmin_password
-    update_user_credentials(credentials)
     return credentials
+
+
+def _handle_garmin_password_change(username: str) -> str | None:
+    """Flujo de recuperación cuando la contraseña de Garmin Connect ha cambiado."""
+    console.print(Panel.fit(
+        "[bold red]❌ Error de autenticación en Garmin Connect[/]\n\n"
+        "Parece que tu contraseña de Garmin Connect ha cambiado.\n"
+        "Introduce tu nueva contraseña para actualizar el acceso.\n"
+        "[dim](Debe coincidir con tu contraseña actual en Garmin Connect)[/]",
+        title="[bold]Contraseña desactualizada[/]",
+        border_style="red",
+    ))
+    for _ in range(3):
+        new_password = Prompt.ask(
+            "Nueva contraseña de Garmin Connect", password=True
+        ).strip()
+        if len(new_password) < 6:
+            console.print("[red]✗[/] Mínimo 6 caracteres.")
+            continue
+        result = update_app_user_password(username, new_password)
+        if not result.get("ok"):
+            console.print(f"[red]✗[/] {result.get('error')}")
+            continue
+        os.environ["GARMIN_PASSWORD"] = new_password
+        console.print("[green]✓[/] Contraseña actualizada. Reconectando con Garmin Connect...")
+        return new_password
+    return None
 
 
 def _ask_goals(profile: dict) -> None:
@@ -764,6 +810,28 @@ async def main() -> None:
         console.print("[dim]Cargando herramientas de Garmin...[/]")
         await agent.initialize()
         console.print(f"[green]✓[/] {len(agent.tools_schema)} herramientas disponibles\n")
+
+        # ── Verificación de acceso a Garmin ───────────────────────────────
+        # Detectar si la contraseña ha cambiado en Garmin Connect antes de continuar.
+        try:
+            from agent.mcp_client import call_tool
+            test_raw = await call_tool(session, "get_user_profile", {})
+            garmin_auth_failed = (
+                test_raw is None
+                or (isinstance(test_raw, str) and any(
+                    kw in test_raw.lower()
+                    for kw in ("401", "unauthorized", "invalid credentials", "login failed",
+                               "authentication", "forbidden", "403")
+                ))
+            )
+            if garmin_auth_failed:
+                new_pw = _handle_garmin_password_change(username)
+                if not new_pw:
+                    console.print("[bold red]No se pudo actualizar la contraseña. Saliendo.[/]")
+                    return
+                app_password = new_pw
+        except Exception:
+            pass  # No bloquear el arranque si el test de verificación falla
 
         # Sincronizar datos personales desde Garmin
         profile_changes = await _sync_from_garmin(agent)
