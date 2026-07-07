@@ -57,10 +57,22 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
   - `weekly_training_hours`: número entre 0.5 y 40, acepta coma o punto decimal.
   - Bucle de reintento con mensaje de error en color hasta que el valor sea válido.
 
-* **🔐 Autenticación OAuth con Garmin:**
-  - Los tokens OAuth se guardan una sola vez en `~/.garminconnect` (válidos ~6 meses).
-  - La password de Garmin no se persiste en la base de datos del agente; se solicita en sesión cuando falta.
-  - Esta garantía está cubierta por tests de no-regresión en la suite de persistencia.
+* **🔐 Auto-login con contraseña cifrada:**
+  - Al arrancar, solo se pide el nombre de usuario. Si ya existe, accede **automáticamente** sin volver a pedir contraseña.
+  - La contraseña se almacena cifrada (Fernet AES-128 + HMAC-SHA256) en Supabase — nunca en texto claro.
+  - Si la contraseña de Garmin Connect cambia, el sistema lo detecta y ofrece un flujo de actualización sin perder la sesión.
+  - La política de seguridad es: contraseña de la app = contraseña de Garmin Connect (una sola contraseña para todo).
+
+* **📊 Análisis profundo de actividades por fecha:**
+  - Pregunta directamente: *"Analiza mi competición del 2 de julio"* y el agente localiza la actividad automáticamente.
+  - Pre-fetch enriquecido: antes de llamar al LLM, el sistema carga actividad + body battery + sueño previo + HRV + carga de entrenamiento.
+  - Todos los cálculos (zonas de FC Z1–Z5 con % y minutos, ritmo en min/km, hidratación estimada, efecto de entrenamiento) se realizan **en Python**, no en el LLM.
+  - El LLM recibe un bloque estructurado pre-computado y se dedica exclusivamente a interpretar y hacer coaching.
+
+* **🧠 Arquitectura de dos capas (datos + coaching):**
+  - **Capa de datos**: conecta con Garmin Connect, pre-procesa y formatea todas las métricas antes de pasarlas al LLM.
+  - **Capa de coaching (LLM)**: recibe datos ya calculados y aporta interpretación, contextualización con el perfil del atleta y recomendaciones accionables.
+  - Esta separación está documentada en el system prompt y garantiza que el LLM nunca intente calcular cosas que ya ha hecho el sistema.
 
 * **💾 Memoria persistente entre sesiones:**
   - Al salir, el agente genera automáticamente un resumen compacto de la sesión con el propio LLM.
@@ -111,8 +123,14 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 Edita `.env` y rellena al menos:
-- `GARMIN_EMAIL` y `GARMIN_PASSWORD`
+- `GARMIN_EMAIL` y `GARMIN_PASSWORD` (solo para pre-autenticación OAuth inicial)
 - La API key del proveedor que uses (`GEMINI_API_KEY`, `GROQ_API_KEY` o `GITHUB_TOKEN`)
+- `SUPABASE_URL` y `SUPABASE_ANON_KEY`
+- `ENCRYPTION_KEY` (genera una vez con el comando de abajo):
+
+```powershell
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
 *(Consulta los comentarios en `.env.example` para obtener las URLs de registro de cada proveedor.)*
 
@@ -158,8 +176,10 @@ Script disponible para Supabase:
 
 ### 5. Inicio de sesión multiusuario
 Al arrancar `python -m agent.main`:
-- Se pide `login` o `nuevo` usuario.
-- Si es `nuevo`, se crea user/pass de app y se vinculan (o introducen) credenciales Garmin.
+- Se pide el **nombre de usuario**.
+- Si el usuario ya existe: **acceso automático** sin contraseña — mensaje *"Usuario encontrado · Accediendo automáticamente"*.
+- Si es nuevo: flujo de registro con explicación de la política de contraseña única (app = Garmin Connect).
+- Si la contraseña de Garmin Connect ha cambiado: el sistema lo detecta y ofrece actualización sin salir.
 - Se precarga el perfil del usuario desde BBDD y se sincroniza Garmin para completar datos personales.
 - En usuarios nuevos, se crea una KB inicial enriquecida (perfil + snapshot MCP de 48h).
 - En usuarios existentes, se muestra un estado proactivo automático de 48h al inicio.
@@ -266,7 +286,7 @@ garmin-ai-coach/
 
 ## 🧪 Tests
 
-El proyecto incluye una suite de **116 tests unitarios** que cubre las funciones críticas sin necesidad de conexión a Garmin ni a ningún LLM.
+El proyecto incluye una suite de **131 tests unitarios** que cubre las funciones críticas sin necesidad de conexión a Garmin ni a ningún LLM.
 
 ### Instalar dependencias de desarrollo
 ```powershell
@@ -282,14 +302,18 @@ pytest
 
 | Módulo | Qué cubre |
 |--------|-----------|
-| `trainer_agent.py` | `_seconds_to_hhmmss`, `_normalize_date_args` (hoy/ayer/today/yesterday), `_strip_garmin_object`, `_compact_tool_result`, `_compact_personal_records` (conversión segundos→HH:MM:SS), `_clean_schema_for_gemini`, `_GeminiCompletions._parse`, utilidades de estado proactivo 48h |
-| `main.py` | `_validate_date`, `_validate_time`, `_validate_hours`, `_is_first_time`, construcción de KB enriquecida de onboarding |
+| `trainer_agent.py` | `_seconds_to_hhmmss`, `_normalize_date_args`, `_strip_garmin_object`, `_compact_tool_result`, `_compact_personal_records`, `_clean_schema_for_gemini`, `_GeminiCompletions._parse`, resolución de actividad por fecha, zonas FC y análisis profundo, estado proactivo 48h, fallbacks de planificación |
+| `main.py` | `_validate_date`, `_validate_time`, `_validate_hours`, `_is_first_time`, KB enriquecida de onboarding, `_ensure_garmin_credentials`, `_build_enriched_athlete_knowledge` |
+| `storage.py` | sanitización de credenciales, no-persistencia de passwords Garmin |
 
 ---
 
 ## 🔒 Privacidad y Seguridad
 
-- **OAuth seguro:** Garmin autentica vía tokens; la contraseña solo se usa en la pre-autenticación inicial y nunca se guarda en disco por el agente.
+- **Contraseña cifrada en BD:** La contraseña se almacena con cifrado simétrico Fernet (AES-128-CBC + HMAC-SHA256) en Supabase. La `ENCRYPTION_KEY` en `.env` es la única clave — nunca la subas a Git.
+- **Hash unidireccional para verificación:** Además del cifrado, el login verifica contra un hash PBKDF2-SHA256 (120.000 iteraciones) para autenticación segura.
+- **Nunca texto claro:** La `_sanitize_credentials_for_storage` garantiza que `garmin_password` y `garmin_password_strategy` nunca lleguen a la columna `credentials` de Supabase.
+- **OAuth tokens de Garmin:** Los tokens OAuth se guardan en `~/.garminconnect` (válidos ~6 meses). La contraseña solo circula en memoria durante la sesión.
 - **API keys hasheadas:** El identificador local de cuota de Gemini usa SHA-256 — la clave nunca se escribe en texto plano.
 - **Pruning inteligente:** Los metadatos innecesarios de la API de Garmin se eliminan antes de enviarlos al LLM, reduciendo tokens y evitando fugas de datos irrelevantes.
 
