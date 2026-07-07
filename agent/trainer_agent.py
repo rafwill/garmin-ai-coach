@@ -1053,6 +1053,13 @@ async def _find_activity_id_by_name(mcp_session: ClientSession, name_hint: str) 
     if not hint:
         return None
 
+    stop_tokens = {
+        "analiza", "analizar", "mi", "mis", "del", "de", "la", "el", "los", "las",
+        "por", "para", "con", "una", "uno", "competicion", "competición", "actividad",
+        "carrera", "quiero", "que", "hice", "hacer", "sobre",
+    }
+    hint_tokens = [t for t in _tokenize_for_kb(hint) if t not in stop_tokens]
+
     start = 0
     limit = 100
     max_pages = 6  # hasta 600 actividades recientes
@@ -1081,6 +1088,13 @@ async def _find_activity_id_by_name(mcp_session: ClientSession, name_hint: str) 
                 score = 80
             elif all(tok in name for tok in hint.split() if tok):
                 score = 70
+            else:
+                # Fallback robusto para texto libre del usuario:
+                # puntuar por solape de tokens relevantes (ignorando ruido).
+                if hint_tokens:
+                    overlap = sum(1 for tok in hint_tokens if tok in name)
+                    if overlap >= 2:
+                        score = 60 + min(overlap * 5, 20)
 
             if score > best_score:
                 activity_id = activity.get("activityId") or activity.get("activity_id") or activity.get("id")
@@ -1101,14 +1115,18 @@ async def _find_activity_id_by_name(mcp_session: ClientSession, name_hint: str) 
     return None
 
 
-async def _normalize_get_activity_args(mcp_session: ClientSession, arguments: dict) -> dict:
+async def _normalize_get_activity_args(
+    mcp_session: ClientSession,
+    arguments: dict,
+    user_message: str | None = None,
+) -> dict:
     """Normaliza argumentos de get_activity.
 
     Acepta activity_id numérico o fechas en lenguaje natural/ISO y resuelve el
     ID automáticamente consultando get_activities cuando sea necesario.
     """
     if not isinstance(arguments, dict):
-        return {}
+        arguments = {}
 
     args = dict(arguments)
     candidate = args.get("activity_id")
@@ -1118,6 +1136,8 @@ async def _normalize_get_activity_args(mcp_session: ClientSession, arguments: di
         candidate = args.get("id")
     if candidate is None:
         candidate = args.get("date")
+    if candidate is None and isinstance(user_message, str) and user_message.strip():
+        candidate = user_message.strip()
 
     # ID ya numérico
     if isinstance(candidate, (int, float)):
@@ -1154,7 +1174,7 @@ async def _normalize_get_activity_args(mcp_session: ClientSession, arguments: di
         if isinstance(v, (int, float)) or (isinstance(v, str) and v.strip().isdigit()):
             return {"activity_id": int(v)}
         return {}
-    return args
+    return {}
 
 
 class TrainerAgent:
@@ -1614,7 +1634,11 @@ class TrainerAgent:
                     # Normalizar fechas: convertir palabras como 'hoy'/'ayer' a ISO
                     arguments = _normalize_date_args(arguments)
                     if tool_name == "get_activity":
-                        arguments = await _normalize_get_activity_args(self.mcp_session, arguments)
+                        arguments = await _normalize_get_activity_args(
+                            self.mcp_session,
+                            arguments,
+                            user_message=user_message,
+                        )
 
                     print(f"  [debug] Ejecutando: {tool_name}({arguments})")
                     raw_result = await call_tool(

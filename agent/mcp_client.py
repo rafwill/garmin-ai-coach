@@ -6,10 +6,28 @@ y expone sus herramientas para que el agente las use.
 
 import os
 import shutil
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+
+def _resolve_command(command_name: str) -> str | None:
+    """Resuelve un ejecutable por PATH o por la carpeta Scripts del Python activo."""
+    found = shutil.which(command_name)
+    if found:
+        return found
+
+    scripts_dir = Path(sys.executable).parent
+    candidates = [scripts_dir / command_name]
+    if os.name == "nt":
+        candidates.append(scripts_dir / f"{command_name}.exe")
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def _get_server_params(essential_only: bool = True) -> StdioServerParameters:
@@ -25,10 +43,10 @@ def _get_server_params(essential_only: bool = True) -> StdioServerParameters:
 
     # Localizar garmin-mcp instalado localmente (vía pip install garmin-mcp)
     # o como fallback uvx (requiere descarga de Python 3.12, falla con Zscaler)
-    garmin_cmd = shutil.which("garmin-mcp")
+    garmin_cmd = _resolve_command("garmin-mcp")
     use_uvx = False
     if not garmin_cmd:
-        uvx_cmd = shutil.which("uvx")
+        uvx_cmd = _resolve_command("uvx")
         if not uvx_cmd:
             raise RuntimeError(
                 "No se encontró 'garmin-mcp' ni 'uvx' en el PATH.\n"
