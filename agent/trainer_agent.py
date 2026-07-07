@@ -13,6 +13,7 @@ import hashlib
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import truststore
@@ -24,7 +25,6 @@ from agent import storage as _storage
 
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
-MEMORY_DIR  = Path(__file__).parent.parent / "memory"  # mantenido por compatibilidad
 
 
 def _load_system_prompt(compact: bool = False) -> str:
@@ -41,7 +41,7 @@ def _load_system_prompt(compact: bool = False) -> str:
 
 # ─── Funciones de persistencia ───────────────────────────────────────────────
 # Thin wrappers sobre agent.storage para mantener compatibilidad con imports
-# existentes en main.py y los tests. Toda la lógica (Supabase + fallback JSON)
+# existentes en main.py y los tests. Toda la lógica de persistencia
 # vive en agent/storage.py.
 
 def _load_user_profile() -> dict:
@@ -98,6 +98,14 @@ def mark_gemini_quota_exhausted(api_key: str) -> None:
 # Limitamos el número para no superar los límites de tokens del modelo
 # Máximo de caracteres por resultado de herramienta para no exceder el límite de tokens
 _MAX_TOOL_RESULT_CHARS = 3000
+_KB_CHUNK_SIZE_CHARS = 900
+_KB_MAX_CHUNKS = 4
+_KB_MAX_CHARS_PER_FILE = 50_000
+_KB_DEFAULT_FILES = (
+    "memory/athlete_knowledge.md",
+    "memory/athlete_knowledge.txt",
+    "memory/athlete_knowledge.json",
+)
 
 # Campos de los objetos Garmin que NO deben llegar al LLM:
 # - Timestamps de inicio (prStartTimeGMT, startTimeLocal, etc.) → contienen la
@@ -301,6 +309,259 @@ def _build_tools_schema(tools: list[dict]) -> list[dict]:
         }
         for tool in tools
     ]
+
+
+def _resolve_kb_paths(env_value: str | None, project_root: Path | None = None) -> list[Path]:
+    """Resuelve los archivos de base de conocimiento del atleta a rutas absolutas.
+
+    Si ATHLETE_KB_PATHS no está definido, usa una lista de rutas por defecto
+    dentro del proyecto.
+    """
+    root = project_root or (Path(__file__).parent.parent)
+    raw_paths = [p.strip() for p in (env_value or "").split(",") if p.strip()]
+    if not raw_paths:
+        raw_paths = list(_KB_DEFAULT_FILES)
+
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for raw in raw_paths:
+        p = Path(raw)
+        if not p.is_absolute():
+            p = root / p
+        p = p.resolve()
+        key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(p)
+    return resolved
+
+
+def _json_to_kb_text(data: Any, prefix: str = "") -> str:
+    """Aplana JSON a texto legible para recuperación semántica ligera."""
+    lines: list[str] = []
+
+    if isinstance(data, dict):
+        for k, v in data.items():
+            next_prefix = f"{prefix}.{k}" if prefix else str(k)
+            lines.append(_json_to_kb_text(v, next_prefix))
+        return "\n".join(line for line in lines if line)
+
+    if isinstance(data, list):
+        for idx, item in enumerate(data):
+            next_prefix = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+            lines.append(_json_to_kb_text(item, next_prefix))
+        return "\n".join(line for line in lines if line)
+
+    value = "" if data is None else str(data).strip()
+    if not value:
+        return ""
+    return f"{prefix}: {value}" if prefix else value
+
+
+def _load_athlete_knowledge_chunks(
+    env_value: str | None = None,
+    project_root: Path | None = None,
+    chunk_size: int = _KB_CHUNK_SIZE_CHARS,
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Carga archivos de conocimiento del atleta y devuelve chunks + fuentes.
+
+    Formatos soportados: .md, .txt, .json.
+    """
+    chunks: list[dict[str, str]] = []
+    sources: list[str] = []
+    for path in _resolve_kb_paths(env_value, project_root):
+        if not path.exists() or not path.is_file():
+            continue
+
+        suffix = path.suffix.lower()
+        if suffix not in {".md", ".txt", ".json"}:
+            continue
+
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if not raw.strip():
+            continue
+
+        text = raw
+        if suffix == ".json":
+            try:
+                parsed = json.loads(raw)
+                text = _json_to_kb_text(parsed)
+            except Exception:
+                text = raw
+
+        text = text.strip()[:_KB_MAX_CHARS_PER_FILE]
+        if not text:
+            continue
+
+        # Preferimos cortar por párrafos para que los fragmentos sean más útiles.
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+        if not paragraphs:
+            paragraphs = [text]
+
+        current = ""
+        for paragraph in paragraphs:
+            candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+            if len(candidate) <= chunk_size:
+                current = candidate
+                continue
+
+            if current:
+                chunks.append({"source": path.name, "text": current})
+                current = ""
+
+            # Si un párrafo es demasiado largo, lo partimos por ventanas fijas.
+            start = 0
+            while start < len(paragraph):
+                piece = paragraph[start:start + chunk_size].strip()
+                if piece:
+                    chunks.append({"source": path.name, "text": piece})
+                start += chunk_size
+
+        if current:
+            chunks.append({"source": path.name, "text": current})
+
+        sources.append(path.name)
+
+    return chunks, sorted(set(sources))
+
+
+def _tokenize_for_kb(text: str) -> list[str]:
+    """Tokenizador simple para retrieval léxico robusto en español/inglés."""
+    return re.findall(r"[a-zA-Z0-9áéíóúñüÁÉÍÓÚÑÜ]{3,}", (text or "").lower())
+
+
+def _retrieve_athlete_knowledge(
+    query: str,
+    chunks: list[dict[str, str]],
+    top_k: int = _KB_MAX_CHUNKS,
+) -> list[dict[str, str]]:
+    """Recupera los fragmentos más relevantes de la base del atleta."""
+    if not chunks:
+        return []
+
+    query_tokens = set(_tokenize_for_kb(query))
+    if not query_tokens:
+        return chunks[: min(top_k, len(chunks))]
+
+    scored: list[tuple[int, int, dict[str, str]]] = []
+    for idx, chunk in enumerate(chunks):
+        text = chunk.get("text", "")
+        text_tokens = set(_tokenize_for_kb(text))
+        overlap = len(query_tokens & text_tokens)
+        if overlap <= 0:
+            continue
+        # Ranking estable: más solape, y en empate mantener orden de carga.
+        scored.append((overlap, -idx, chunk))
+
+    if not scored:
+        return chunks[: min(top_k, len(chunks))]
+
+    scored.sort(reverse=True)
+    return [chunk for _, _, chunk in scored[:top_k]]
+
+
+def _build_athlete_knowledge_context(query: str, chunks: list[dict[str, str]]) -> str:
+    """Construye el bloque de contexto RAG a inyectar en mensajes."""
+    selected = _retrieve_athlete_knowledge(query, chunks)
+    if not selected:
+        return ""
+
+    lines = [
+        "## Base de Conocimiento del atleta (RAG)",
+        "Combina estos fragmentos con el Perfil del usuario y los datos reales de Garmin.",
+    ]
+    for item in selected:
+        source = item.get("source", "kb")
+        text = item.get("text", "").strip()
+        if not text:
+            continue
+        trimmed = text[:900]
+        ellipsis = "…" if len(text) > 900 else ""
+        lines.append(f"- Fuente: {source}\\n{trimmed}{ellipsis}")
+    return "\n".join(lines)
+
+
+def _try_parse_json(raw: str | None) -> Any:
+    """Parsea JSON de forma tolerante; devuelve None si no aplica."""
+    if not raw or not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text.startswith("{") and not text.startswith("["):
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _extract_activities_list(payload: Any) -> list[dict]:
+    """Extrae una lista de actividades desde distintas formas de respuesta."""
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    if isinstance(payload, dict):
+        candidates = payload.get("activities")
+        if isinstance(candidates, list):
+            return [x for x in candidates if isinstance(x, dict)]
+    return []
+
+
+def _is_activity_in_last_48h(activity: dict, now: datetime | None = None) -> bool:
+    """Comprueba si una actividad cae en la ventana de últimas 48h."""
+    now_dt = now or datetime.now()
+    start_local = activity.get("startTimeLocal") or activity.get("startTimeGMT") or ""
+    if not isinstance(start_local, str) or "T" not in start_local:
+        return False
+
+    date_part = start_local.split("T", 1)[0]
+    try:
+        act_date = datetime.fromisoformat(date_part)
+    except ValueError:
+        return False
+
+    return (now_dt - act_date) <= timedelta(hours=48)
+
+
+def _build_proactive_status_markdown(snapshot: dict) -> str:
+    """Genera un bloque Markdown con estado proactivo de últimas 48h."""
+    profile_changes = snapshot.get("profile_changes", []) or []
+    body_battery = snapshot.get("body_battery", {}) or {}
+    hrv = snapshot.get("hrv", {}) or {}
+    sleep = snapshot.get("sleep", {}) or {}
+    trainings = snapshot.get("trainings", []) or []
+
+    lines = [
+        "## Estado Proactivo (ultimas 48h)",
+        "",
+    ]
+
+    if profile_changes:
+        lines.append(f"- Perfil Garmin actualizado: {', '.join(profile_changes)}")
+    else:
+        lines.append("- Perfil Garmin sin cambios detectados")
+
+    lines.append("- Body Battery: " + (body_battery.get("summary") or "sin datos recientes"))
+    lines.append("- HRV: " + (hrv.get("summary") or "sin datos recientes"))
+    lines.append("- Sueno: " + (sleep.get("summary") or "sin datos recientes"))
+
+    if trainings:
+        lines.append("- Entrenamientos recientes:")
+        for item in trainings[:3]:
+            name = item.get("name") or "Actividad"
+            day = item.get("date") or "fecha desconocida"
+            lines.append(f"  - {day}: {name}")
+    else:
+        lines.append("- Entrenamientos recientes: no se encontraron en las ultimas 48h")
+
+    lines.extend([
+        "",
+        "### Recomendacion inicial",
+        "- Usa este estado como base para ajustar la sesion de hoy antes de pedir un plan detallado.",
+    ])
+    return "\n".join(lines)
 
 
 # ─── Cliente Gemini (SDK oficial google-genai, soporta claves AQ.) ────────────
@@ -912,6 +1173,14 @@ class TrainerAgent:
         self.user_profile = _load_user_profile()
         self.conversation_history: list[dict] = []
         self.tools_schema: list[dict] = []
+        self.knowledge_chunks, self.knowledge_sources = _load_athlete_knowledge_chunks(
+            os.environ.get("ATHLETE_KB_PATHS", "")
+        )
+        stored_kb = (_storage.load_athlete_knowledge() or "").strip()
+        if stored_kb:
+            self.knowledge_chunks.append({"source": "db:athlete_knowledge", "text": stored_kb[:4000]})
+            if "db:athlete_knowledge" not in self.knowledge_sources:
+                self.knowledge_sources.append("db:athlete_knowledge")
         
         # Variables para tracking de tokens de la sesión
         self.total_prompt_tokens = 0
@@ -985,7 +1254,7 @@ class TrainerAgent:
         tools = await list_available_tools(self.mcp_session)
         self.tools_schema = _build_tools_schema(tools)
 
-        # Restaurar los últimos 6 mensajes del historial (de session_context.json)
+        # Restaurar los últimos 6 mensajes del historial persistido
         ctx = _load_session_context()
         for entry in ctx.get("history", [])[-6:]:
             role = entry.get("role")
@@ -1070,6 +1339,82 @@ class TrainerAgent:
 
         return result
 
+    async def collect_startup_snapshot_48h(self) -> dict:
+        """Recoge un snapshot operativo de 48h para briefing de arranque."""
+        today_iso = date.today().isoformat()
+        yesterday_iso = (date.today() - timedelta(days=1)).isoformat()
+
+        async def _tool_json(tool_name: str, args: dict) -> Any:
+            try:
+                raw = await call_tool(self.mcp_session, tool_name, args)
+            except Exception:
+                return None
+            parsed_raw = _try_parse_json(raw)
+            if parsed_raw is not None:
+                return parsed_raw
+            compact = _compact_tool_result(raw, tool_name)
+            parsed = _try_parse_json(compact)
+            return parsed if parsed is not None else compact
+
+        body_today = await _tool_json("get_body_battery", {"date": today_iso})
+        body_yday = await _tool_json("get_body_battery", {"date": yesterday_iso})
+        hrv_today = await _tool_json("get_hrv_data", {"date": today_iso})
+        hrv_yday = await _tool_json("get_hrv_data", {"date": yesterday_iso})
+        sleep_today = await _tool_json("get_sleep_summary", {"date": today_iso})
+        sleep_yday = await _tool_json("get_sleep_summary", {"date": yesterday_iso})
+
+        activities_raw = await _tool_json("get_activities", {"start": "0", "limit": "12"})
+        activities = _extract_activities_list(activities_raw)
+        recent_trainings: list[dict] = []
+        for activity in activities:
+            if not _is_activity_in_last_48h(activity):
+                continue
+            start_local = str(activity.get("startTimeLocal") or "")
+            day = start_local.split("T", 1)[0] if "T" in start_local else ""
+            recent_trainings.append(
+                {
+                    "date": day,
+                    "name": activity.get("name") or activity.get("activityName") or activity.get("activityType") or "Actividad",
+                    "activity_id": activity.get("activityId") or activity.get("id"),
+                }
+            )
+
+        body_summary = "sin datos"
+        if body_today or body_yday:
+            body_summary = f"hoy={'ok' if body_today else 'no'} · ayer={'ok' if body_yday else 'no'}"
+
+        hrv_summary = "sin datos"
+        if hrv_today or hrv_yday:
+            hrv_summary = f"hoy={'ok' if hrv_today else 'no'} · ayer={'ok' if hrv_yday else 'no'}"
+
+        sleep_summary = "sin datos"
+        if sleep_today or sleep_yday:
+            sleep_summary = f"hoy={'ok' if sleep_today else 'no'} · ayer={'ok' if sleep_yday else 'no'}"
+
+        return {
+            "window_hours": 48,
+            "dates": {"today": today_iso, "yesterday": yesterday_iso},
+            "body_battery": {"today": body_today, "yesterday": body_yday, "summary": body_summary},
+            "hrv": {"today": hrv_today, "yesterday": hrv_yday, "summary": hrv_summary},
+            "sleep": {"today": sleep_today, "yesterday": sleep_yday, "summary": sleep_summary},
+            "trainings": recent_trainings[:5],
+        }
+
+    async def build_startup_status_markdown(self, profile_changes: list[str] | None = None) -> str:
+        """Construye el mensaje proactivo mostrado al arrancar la sesion."""
+        snapshot = await self.collect_startup_snapshot_48h()
+        snapshot["profile_changes"] = profile_changes or []
+        return _build_proactive_status_markdown(snapshot)
+
+    async def build_onboarding_mcp_enrichment(self) -> dict:
+        """Obtiene datos MCP utiles para enriquecer la base inicial del atleta."""
+        personal = await self.fetch_garmin_personal_data()
+        startup = await self.collect_startup_snapshot_48h()
+        return {
+            "personal": personal,
+            "startup_48h": startup,
+        }
+
     def get_daily_usage_info(self) -> dict:
         """Devuelve información sobre el uso diario de tokens del proveedor actual."""
         api_key = getattr(self, "_api_key", "")
@@ -1148,7 +1493,17 @@ class TrainerAgent:
                 f"{lines}\n"
             )
 
-        return self.system_prompt + date_context + profile_context + memory_context
+        kb_context = ""
+        if self.knowledge_sources:
+            kb_files = ", ".join(self.knowledge_sources)
+            kb_context = (
+                f"\n\n## Base de conocimiento del atleta\n"
+                f"- Fuentes disponibles: {kb_files}\n"
+                f"- Usa esta base como prioridad junto al Perfil del usuario.\n"
+                f"- Para responder, combina esta base con datos reales de Garmin obtenidos por herramientas.\n"
+            )
+
+        return self.system_prompt + date_context + profile_context + memory_context + kb_context
 
     def _build_messages(self, user_message: str) -> list[dict]:
         """Construye el array de mensajes para la llamada al LLM.
@@ -1156,6 +1511,9 @@ class TrainerAgent:
         para mantener el contexto razonable sin consumir tokens innecesarios.
         """
         messages = [{"role": "system", "content": self._build_system_prompt()}]
+        rag_context = _build_athlete_knowledge_context(user_message, self.knowledge_chunks)
+        if rag_context:
+            messages.append({"role": "system", "content": rag_context})
         # Solo los últimos 6 mensajes del historial (3 intercambios)
         messages.extend(self.conversation_history[-6:])
         messages.append({"role": "user", "content": user_message})

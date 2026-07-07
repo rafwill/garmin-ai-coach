@@ -15,7 +15,7 @@ garmin-mcp @ git+https://github.com/Taxuspt/garmin_mcp
 # uv / uvx — gestor de herramientas Python (fallback si garmin-mcp no está disponible)
 uv>=0.4.0
 
-# Almacenamiento en la nube (opcional: si no se configura, usa ficheros JSON locales)
+# Persistencia DB-first multiusuario en Supabase
 supabase>=2.0.0
 
 # Variables de entorno

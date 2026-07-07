@@ -13,20 +13,28 @@ Cubre:
 
 import json
 from datetime import date, timedelta
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent.trainer_agent import (
+    _build_athlete_knowledge_context,
+    _build_proactive_status_markdown,
     _build_recovery_fallback_snapshot,
     _clean_schema_for_gemini,
     _compact_personal_records,
     _compact_tool_result,
+    _extract_activities_list,
     _extract_iso_date_from_text,
     _GeminiCompletions,
+    _is_activity_in_last_48h,
     _is_no_data_result,
     _normalize_get_activity_args,
     _normalize_date_args,
+    _load_athlete_knowledge_chunks,
+    _resolve_kb_paths,
+    _retrieve_athlete_knowledge,
     _seconds_to_hhmmss,
     _strip_garmin_object,
 )
@@ -227,6 +235,52 @@ class TestCompactToolResult:
         result_dict = json.loads(result)
         assert result_dict["duration_hhmmss"] == "10:10:12"
         assert result_dict["distance_km"] == 54.43
+
+
+# ─── Base de conocimiento del atleta (RAG) ──────────────────────────────────
+
+class TestAthleteKnowledgeRag:
+    def test_resolve_kb_paths_uses_defaults_when_env_empty(self, tmp_path: Path):
+        paths = _resolve_kb_paths("", project_root=tmp_path)
+        assert len(paths) >= 3
+        assert str(paths[0]).startswith(str(tmp_path))
+
+    def test_load_knowledge_chunks_from_txt_and_json(self, tmp_path: Path):
+        txt_file = tmp_path / "athlete_notes.txt"
+        txt_file.write_text("Objetivo: bajar de 10h en la PDA.\nFuerza de sóleo 2 veces/semana.", encoding="utf-8")
+
+        json_file = tmp_path / "athlete_profile.json"
+        json_file.write_text(
+            json.dumps({"nutrition": {"during_long_run": "60-90g CH/h"}, "injuries": ["soleo"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        env_paths = f"{txt_file},{json_file}"
+        chunks, sources = _load_athlete_knowledge_chunks(env_paths, project_root=tmp_path, chunk_size=120)
+
+        assert chunks, "Debe generar chunks desde archivos válidos"
+        assert "athlete_notes.txt" in sources
+        assert "athlete_profile.json" in sources
+        joined = "\n".join(c["text"] for c in chunks)
+        assert "bajar de 10h" in joined
+        assert "during_long_run" in joined
+
+    def test_retrieve_returns_most_relevant_chunks(self):
+        chunks = [
+            {"source": "a.txt", "text": "Trabajo de umbral y VO2max para 10K."},
+            {"source": "b.txt", "text": "Diabetes tipo 1: controlar glucemia antes de tiradas largas."},
+            {"source": "c.txt", "text": "Series en cuesta y técnica de bajada con bastones."},
+        ]
+        out = _retrieve_athlete_knowledge("Tengo diabetes y haré tirada larga", chunks, top_k=2)
+        assert out
+        assert out[0]["source"] == "b.txt"
+
+    def test_build_knowledge_context_includes_header_and_source(self):
+        chunks = [{"source": "kb.md", "text": "Objetivo principal: PDA sub10h."}]
+        ctx = _build_athlete_knowledge_context("objetivo PDA", chunks)
+        assert "Base de Conocimiento del atleta" in ctx
+        assert "Fuente: kb.md" in ctx
+        assert "PDA sub10h" in ctx
 
 
 # ─── _compact_personal_records ────────────────────────────────────────────────
@@ -532,3 +586,54 @@ class TestRecoveryFallback:
         assert payload is not None
         parsed = json.loads(payload)
         assert parsed["snapshot"]["get_body_battery"]["data"]["raw"] == "Battery score: 58"
+
+
+# ─── Startup 48h proactivo ────────────────────────────────────────────────
+
+class TestStartupProactive:
+    def test_extract_activities_list_supports_dict_payload(self):
+        payload = {"activities": [{"activityId": 1}, {"activityId": 2}]}
+        out = _extract_activities_list(payload)
+        assert len(out) == 2
+
+    def test_is_activity_in_last_48h_true_for_recent_day(self):
+        today = date.today().isoformat()
+        activity = {"startTimeLocal": f"{today}T08:00:00.0"}
+        assert _is_activity_in_last_48h(activity)
+
+    def test_build_proactive_status_markdown_contains_sections(self):
+        payload = {
+            "profile_changes": ["peso", "altura"],
+            "body_battery": {"summary": "hoy=ok · ayer=ok"},
+            "hrv": {"summary": "hoy=no · ayer=ok"},
+            "sleep": {"summary": "hoy=ok · ayer=no"},
+            "trainings": [{"date": "2026-07-06", "name": "Trail suave"}],
+        }
+        out = _build_proactive_status_markdown(payload)
+        assert "Estado Proactivo" in out
+        assert "Perfil Garmin actualizado" in out
+        assert "Trail suave" in out
+
+    @pytest.mark.asyncio
+    async def test_collect_startup_snapshot_48h_collects_metrics(self):
+        from agent.trainer_agent import TrainerAgent
+
+        async def _fake_call_tool(_session, tool_name, _arguments):
+            if tool_name == "get_activities":
+                today = date.today().isoformat()
+                return json.dumps({
+                    "activities": [
+                        {"activityId": 777, "name": "Rodaje", "startTimeLocal": f"{today}T07:30:00.0"}
+                    ]
+                })
+            return json.dumps({"ok": True})
+
+        agent = object.__new__(TrainerAgent)
+        agent.mcp_session = MagicMock()
+
+        with patch("agent.trainer_agent.call_tool", side_effect=_fake_call_tool):
+            snapshot = await TrainerAgent.collect_startup_snapshot_48h(agent)
+
+        assert snapshot["window_hours"] == 48
+        assert snapshot["body_battery"]["summary"].startswith("hoy=")
+        assert snapshot["trainings"]

@@ -26,10 +26,12 @@ node_modules/
 # VS Code (configuración local de cada desarrollador)
 .vscode/
 
-# Memoria del usuario (puede contener datos personales)
-memory/user_profile.json
-memory/session_context.json
-memory/gemini_daily_usage.json
+# Runtime local (no versionar)
+agent.log
+
+# Memoria local del usuario (puede contener datos personales)
+memory/*
+!memory/.gitkeep
 
 # OS
 .DS_Store

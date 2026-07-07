@@ -6,20 +6,18 @@ Cubre:
   - _validate_date
   - _validate_time
   - _validate_hours
-  - _garmin_user_id
   - _is_first_time
 """
 
-import hashlib
-import os
 from datetime import date, timedelta
 from unittest.mock import patch
 
 import pytest
 
 from agent.main import (
+    _auto_select_provider,
+    _build_enriched_athlete_knowledge,
     _format_coach_markdown,
-    _garmin_user_id,
     _is_first_time,
     _validate_date,
     _validate_hours,
@@ -174,46 +172,10 @@ class TestValidateHours:
         assert "número" in err
 
 
-# ─── _garmin_user_id ─────────────────────────────────────────────────────────
-
-class TestGarminUserId:
-    def test_returns_unknown_without_email(self):
-        with patch.dict(os.environ, {}, clear=True):
-            uid = _garmin_user_id()
-        assert uid == "unknown"
-
-    def test_returns_hash_with_email(self):
-        with patch.dict(os.environ, {"GARMIN_EMAIL": "test@example.com"}):
-            uid = _garmin_user_id()
-        expected = hashlib.sha256("test@example.com".encode()).hexdigest()[:16]
-        assert uid == expected
-
-    def test_email_is_lowercased(self):
-        with patch.dict(os.environ, {"GARMIN_EMAIL": "Test@Example.COM"}):
-            uid = _garmin_user_id()
-        expected = hashlib.sha256("test@example.com".encode()).hexdigest()[:16]
-        assert uid == expected
-
-    def test_return_is_16_chars(self):
-        with patch.dict(os.environ, {"GARMIN_EMAIL": "any@mail.com"}):
-            uid = _garmin_user_id()
-        assert len(uid) == 16
-
-    def test_different_emails_give_different_ids(self):
-        with patch.dict(os.environ, {"GARMIN_EMAIL": "a@x.com"}):
-            uid_a = _garmin_user_id()
-        with patch.dict(os.environ, {"GARMIN_EMAIL": "b@x.com"}):
-            uid_b = _garmin_user_id()
-        assert uid_a != uid_b
-
-
 # ─── _is_first_time ──────────────────────────────────────────────────────────
 
 class TestIsFirstTime:
-    """
-    _is_first_time() llama a _load_user_profile() (persistencia) y a
-    _garmin_user_id() (env).  Mockeamos ambos para aislar la lógica.
-    """
+    """_is_first_time() depende solo de setup_complete en el perfil."""
 
     def test_no_profile_returns_true(self):
         with patch("agent.main._load_user_profile", return_value={}):
@@ -223,33 +185,16 @@ class TestIsFirstTime:
         with patch("agent.main._load_user_profile", return_value={"setup_complete": False}):
             assert _is_first_time() is True
 
-    def test_setup_complete_same_uid_returns_false(self):
-        uid = hashlib.sha256("user@test.com".encode()).hexdigest()[:16]
-        with patch.dict(os.environ, {"GARMIN_EMAIL": "user@test.com"}):
-            with patch("agent.main._load_user_profile", return_value={
-                "setup_complete": True,
-                "garmin_user_id": uid,
-            }):
-                assert _is_first_time() is False
+    def test_setup_complete_true_returns_false(self):
+        with patch("agent.main._load_user_profile", return_value={"setup_complete": True}):
+            assert _is_first_time() is False
 
-    def test_setup_complete_different_uid_returns_true(self):
-        with patch.dict(os.environ, {"GARMIN_EMAIL": "new@test.com"}):
-            with patch("agent.main._load_user_profile", return_value={
-                "setup_complete": True,
-                "garmin_user_id": "olduid12",
-            }):
-                assert _is_first_time() is True
-
-    def test_empty_stored_uid_not_account_change(self):
-        """Sin garmin_user_id guardado, la condición de cambio de cuenta no se activa
-        (stored_uid es falsy → la rama 'if stored_uid' no se toma)."""
-        with patch.dict(os.environ, {"GARMIN_EMAIL": "any@test.com"}):
-            with patch("agent.main._load_user_profile", return_value={
-                "setup_complete": False,
-                "garmin_user_id": "",
-            }):
-                # setup_complete=False → siempre True
-                assert _is_first_time() is True
+    def test_ignores_legacy_garmin_uid_field(self):
+        with patch("agent.main._load_user_profile", return_value={
+            "setup_complete": True,
+            "garmin_user_id": "legacy-value",
+        }):
+            assert _is_first_time() is False
 
 
 # ─── _format_coach_markdown ────────────────────────────────────────────────
@@ -271,3 +216,53 @@ class TestFormatCoachMarkdown:
         assert "- Readiness alta" in out
         assert "- Body Battery 82" in out
         assert "- Sueño sólido" in out
+
+
+# ─── _build_enriched_athlete_knowledge ─────────────────────────────────────
+
+class TestBuildEnrichedAthleteKnowledge:
+    def test_includes_profile_and_mcp_sections(self):
+        profile = {
+            "personal": {"name": "Rafa", "height_cm": 178, "weight_kg": 70.2},
+            "goals": {"primary": "trail running", "target_race": "PDA", "target_time": "09:59:00"},
+            "health": {"injuries": ["DT1"], "notes": "control glucemia"},
+        }
+        enrichment = {
+            "personal": {"age": 39, "gender": "hombre", "weight_kg": 70.1},
+            "startup_48h": {
+                "body_battery": {"summary": "hoy=ok · ayer=ok"},
+                "hrv": {"summary": "hoy=ok · ayer=no"},
+                "sleep": {"summary": "hoy=ok · ayer=ok"},
+                "trainings": [{"date": "2026-07-06", "name": "Rodaje suave"}],
+            },
+        }
+
+        out = _build_enriched_athlete_knowledge(profile, enrichment)
+
+        assert "Base de Conocimiento del Atleta" in out
+        assert "Enriquecimiento MCP (arranque)" in out
+        assert "Estado de las ultimas 48h" in out
+        assert "Rodaje suave" in out
+        assert "```json" in out
+
+
+# ─── _auto_select_provider ──────────────────────────────────────────────────
+
+class TestAutoSelectProvider:
+    def test_vpn_detected_uses_menu_with_on_vpn_true(self):
+        with patch("agent.main._detect_zscaler", return_value=True), \
+             patch("agent.main._select_provider_menu", return_value="vpn") as menu_mock, \
+             patch("agent.main.console.print"):
+            provider = _auto_select_provider()
+
+        assert provider == "vpn"
+        menu_mock.assert_called_once_with(on_vpn=True)
+
+    def test_no_vpn_uses_menu_with_on_vpn_false(self):
+        with patch("agent.main._detect_zscaler", return_value=False), \
+             patch("agent.main._select_provider_menu", return_value="nvidia") as menu_mock, \
+             patch("agent.main.console.print"):
+            provider = _auto_select_provider()
+
+        assert provider == "nvidia"
+        menu_mock.assert_called_once_with(on_vpn=False)

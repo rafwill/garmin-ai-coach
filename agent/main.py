@@ -5,7 +5,7 @@ Interfaz de conversación en terminal.
 """
 
 import asyncio
-import hashlib
+import json
 import os
 import re
 import sys
@@ -53,16 +53,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent.mcp_client import garmin_mcp_session
 from agent.trainer_agent import TrainerAgent, _load_user_profile, _save_user_profile
-from agent.storage import check_supabase_connection, migrate_local_to_supabase
+from agent.storage import (
+    authenticate_app_user,
+    check_supabase_connection,
+    get_active_user,
+    load_athlete_knowledge,
+    register_app_user,
+    save_athlete_knowledge,
+    set_active_user,
+    update_user_credentials,
+)
 
 
-def _garmin_user_id() -> str:
-    """Devuelve un identificador único basado en el email de Garmin configurado en .env."""
-    email = os.environ.get("GARMIN_EMAIL", "").strip().lower()
-    return hashlib.sha256(email.encode()).hexdigest()[:16] if email else "unknown"
-
-
-async def _sync_from_garmin(agent) -> None:
+async def _sync_from_garmin(agent) -> list[str]:
     """
     Siempre se ejecuta al arrancar.
     Obtiene nombre, edad, género, peso y altura desde Garmin Connect
@@ -76,12 +79,10 @@ async def _sync_from_garmin(agent) -> None:
 
     if not garmin_data:
         console.print("[dim yellow]No se pudieron obtener datos personales de Garmin.[/]")
-        return
+        return []
 
     profile = _load_user_profile()
     p = profile.setdefault("personal", {})
-    # Guardar qué usuario de Garmin generó estos datos
-    profile["garmin_user_id"] = _garmin_user_id()
 
     updated = []
     labels = {"name": "nombre", "age": "edad", "gender": "género",
@@ -97,19 +98,15 @@ async def _sync_from_garmin(agent) -> None:
         console.print(f"[green]✓[/] Garmin → perfil actualizado: [dim]{', '.join(updated)}[/]")
     else:
         console.print("[dim]✓ Datos de Garmin sin cambios.[/]")
+    return updated
 
 
 def _is_first_time() -> bool:
     """
-    Devuelve True si este usuario de Garmin no ha completado el setup de objetivos.
-    Se detecta por la ausencia de 'setup_complete' o por cambio de cuenta de Garmin.
+    Devuelve True si el usuario activo no ha completado el setup de objetivos.
+    Se detecta por la ausencia de 'setup_complete'.
     """
     profile = _load_user_profile()
-    current_uid = _garmin_user_id()
-    stored_uid = profile.get("garmin_user_id", "")
-    # Si cambió el usuario de Garmin, es como una primera vez
-    if stored_uid and stored_uid != current_uid:
-        return True
     return not profile.get("setup_complete", False)
 
 
@@ -150,6 +147,170 @@ def _validate_hours(value: str) -> tuple[bool, str]:
     if h > 40:
         return False, "El máximo es 40 horas/semana. ¿Seguro?"
     return True, ""
+
+
+def _build_initial_athlete_knowledge(profile: dict) -> str:
+    """Genera una base de conocimiento inicial mínima a partir del perfil."""
+    p = profile.get("personal", {})
+    g = profile.get("goals", {})
+    h = profile.get("health", {})
+    injuries = ", ".join(h.get("injuries", [])) if h.get("injuries") else ""
+
+    lines = [
+        "# Base de Conocimiento del Atleta",
+        "",
+        "## Identidad deportiva",
+        f"- Nombre: {p.get('name', '')}",
+        f"- Deporte principal: {g.get('primary', '')}",
+        "",
+        "## Perfil fisiologico y biomarcadores",
+        f"- Altura: {p.get('height_cm', '')}",
+        f"- Peso: {p.get('weight_kg', '')}",
+        "",
+        "## Objetivo principal de carrera",
+        f"- Evento objetivo: {g.get('target_race', '')}",
+        f"- Fecha: {g.get('target_race_date', '')}",
+        f"- Tiempo objetivo: {g.get('target_time', '')}",
+        "",
+        "## Salud y limitaciones",
+        f"- Condiciones medicas relevantes: {injuries}",
+        f"- Notas: {h.get('notes', '')}",
+        "",
+        "## Reglas del coach",
+        "- Priorizar seguridad y continuidad del entrenamiento.",
+        "- Ajustar cargas según recuperación y contexto personal.",
+    ]
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_enriched_athlete_knowledge(profile: dict, enrichment: dict) -> str:
+    """Combina perfil + contexto MCP para persistir una KB inicial mas completa."""
+    base = _build_initial_athlete_knowledge(profile).rstrip()
+    personal = enrichment.get("personal", {}) if isinstance(enrichment, dict) else {}
+    startup = enrichment.get("startup_48h", {}) if isinstance(enrichment, dict) else {}
+
+    lines = [base, "", "## Enriquecimiento MCP (arranque)"]
+    if personal:
+        lines.append("- Datos personales confirmados por Garmin Connect:")
+        for key in ("age", "gender", "weight_kg", "height_cm"):
+            if personal.get(key) is not None and personal.get(key) != "":
+                lines.append(f"  - {key}: {personal.get(key)}")
+    else:
+        lines.append("- Datos personales MCP: no disponibles en este arranque")
+
+    lines.append("")
+    lines.append("## Estado de las ultimas 48h")
+    bb = (startup.get("body_battery") or {}).get("summary", "sin datos") if isinstance(startup, dict) else "sin datos"
+    hrv = (startup.get("hrv") or {}).get("summary", "sin datos") if isinstance(startup, dict) else "sin datos"
+    sleep = (startup.get("sleep") or {}).get("summary", "sin datos") if isinstance(startup, dict) else "sin datos"
+    lines.append(f"- Body Battery: {bb}")
+    lines.append(f"- HRV: {hrv}")
+    lines.append(f"- Sueno: {sleep}")
+
+    trainings = startup.get("trainings", []) if isinstance(startup, dict) else []
+    if trainings:
+        lines.append("- Entrenamientos recientes:")
+        for item in trainings[:5]:
+            day = item.get("date") or "fecha desconocida"
+            name = item.get("name") or "Actividad"
+            lines.append(f"  - {day}: {name}")
+    else:
+        lines.append("- Entrenamientos recientes: sin datos")
+
+    lines.append("")
+    lines.append("## Contexto crudo MCP (resumen)")
+    try:
+        raw_preview = json.dumps(enrichment, ensure_ascii=False)[:1200]
+        lines.append(f"```json\n{raw_preview}\n```")
+    except Exception:
+        lines.append("- No se pudo serializar el resumen MCP")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def _authenticate_or_register_user() -> tuple[str, dict, bool]:
+    """Flujo inicial de acceso: iniciar sesión o registrarse.
+
+    Returns:
+        (username, credentials, is_new_user)
+    """
+    console.print(Panel.fit(
+        "[bold]Acceso a GarminCoach[/]\n"
+        "Trabajarás con un perfil independiente por usuario.",
+        title="[bold blue]Identificación[/]",
+        border_style="blue",
+    ))
+
+    while True:
+        mode = Prompt.ask(
+            "Selecciona una opción",
+            choices=["login", "nuevo"],
+            default="login",
+            show_choices=True,
+        )
+
+        username = Prompt.ask("Usuario").strip().lower()
+        password = Prompt.ask("Password", password=True).strip()
+
+        if mode == "login":
+            result = authenticate_app_user(username, password)
+            if not result.get("ok"):
+                console.print(f"[red]✗[/] {result.get('error', 'No se pudo iniciar sesión')}")
+                continue
+            set_active_user(result.get("user_id"), username)
+            console.print(f"[green]✓[/] Sesión iniciada como [bold]{username}[/].")
+            return username, result.get("credentials") or {}, False
+
+        confirm = Prompt.ask("Repite la password", password=True).strip()
+        if confirm != password:
+            console.print("[red]✗[/] Las passwords no coinciden.")
+            continue
+
+        same_as_login = Prompt.ask(
+            "¿Usar este user/pass también para Garmin Connect?",
+            choices=["si", "no"],
+            default="no",
+        )
+        if same_as_login == "si":
+            default_email = username if "@" in username else ""
+            garmin_email = Prompt.ask("Email Garmin", default=default_email).strip()
+            garmin_password = password
+        else:
+            garmin_email = Prompt.ask("Email Garmin").strip()
+            garmin_password = Prompt.ask("Password Garmin", password=True).strip()
+
+        credentials = {
+            "garmin_email": garmin_email,
+            "garmin_password": garmin_password,
+        }
+        create = register_app_user(username, password, credentials=credentials)
+        if not create.get("ok"):
+            console.print(f"[red]✗[/] {create.get('error', 'No se pudo crear el usuario')}")
+            continue
+
+        set_active_user(create.get("user_id"), username)
+        console.print(f"[green]✓[/] Usuario [bold]{username}[/] creado.")
+        return username, credentials, True
+
+
+def _ensure_garmin_credentials(credentials: dict) -> dict:
+    """Asegura credenciales Garmin para el usuario activo y las deja en entorno."""
+    credentials = dict(credentials or {})
+    garmin_email = (credentials.get("garmin_email") or "").strip()
+    garmin_password = (credentials.get("garmin_password") or "").strip()
+
+    if not garmin_email:
+        garmin_email = Prompt.ask("Email Garmin Connect", default=os.environ.get("GARMIN_EMAIL", "")).strip()
+    if not garmin_password:
+        garmin_password = Prompt.ask("Password Garmin Connect", password=True).strip()
+
+    credentials["garmin_email"] = garmin_email
+    credentials["garmin_password"] = garmin_password
+
+    os.environ["GARMIN_EMAIL"] = garmin_email
+    os.environ["GARMIN_PASSWORD"] = garmin_password
+    update_user_credentials(credentials)
+    return credentials
 
 
 def _ask_goals(profile: dict) -> None:
@@ -267,7 +428,6 @@ def _run_first_time_setup() -> None:
     _ask_goals(profile)
     _ask_health(profile)
     profile["setup_complete"] = True
-    profile["garmin_user_id"] = _garmin_user_id()
     _save_user_profile(profile)
     final_name = profile.get("personal", {}).get("name") or name
     console.print(f"\n[green]✓[/] ¡Todo listo, [bold]{final_name}[/]! Ya puedes empezar.\n")
@@ -383,15 +543,10 @@ _PROVIDER_INFO = {
 
 
 def _check_env(provider: str) -> None:
-    """Verifica que las variables de entorno obligatorias estén definidas."""
+    """Verifica que las variables obligatorias del proveedor LLM estén definidas."""
     missing = []
     env_var, label, _ = _PROVIDER_INFO[provider]
-    
-    # Validar user/password de Garmin siempre
-    for var in ["GARMIN_EMAIL", "GARMIN_PASSWORD"]:
-        if not os.environ.get(var):
-            missing.append(var)
-            
+
     # Validar token solo si el proveedor lo requiere
     if env_var and not os.environ.get(env_var):
         missing.append(env_var)
@@ -413,6 +568,15 @@ def _check_env(provider: str) -> None:
         sys.exit(1)
 
 
+def _check_garmin_env() -> None:
+    """Verifica que haya credenciales Garmin cargadas para el usuario activo."""
+    missing = [v for v in ("GARMIN_EMAIL", "GARMIN_PASSWORD") if not os.environ.get(v)]
+    if missing:
+        for m in missing:
+            console.print(f"[bold red]Error:[/] Falta [bold]{m}[/] para conectar con Garmin Connect")
+        sys.exit(1)
+
+
 # Valores placeholder que indican que la clave no está configurada
 _PLACEHOLDER_VALUES = {"", "tu_clave_mistral", "tu_clave_gemini", "gsk_...", "AIzaSy_tu_clave_de_gemini", "ghp_..."}
 
@@ -427,45 +591,23 @@ def _detect_zscaler() -> bool:  # noqa: F811  (sobrescribe el import con la mism
     return is_zscaler_network()
 
 
-def _best_available_provider() -> str | None:
-    """
-    Devuelve el mejor proveedor configurado para uso fuera de VPN.
-    Prioridad: gemini → mistral → groq → cerebras.
-    Gemini se salta si la cuota diaria está marcada como agotada.
-    """
-    from agent.storage import is_gemini_quota_exhausted
-
-    candidates = [
-        ("gemini",   "GEMINI_API_KEY"),
-        ("mistral",  "MISTRAL_API_KEY"),
-        ("groq",     "GROQ_API_KEY"),
-        ("cerebras", "CEREBRAS_API_KEY"),
-        ("nvidia",   "NVIDIA_API_KEY"),
-    ]
-    for name, env_var in candidates:
-        val = os.environ.get(env_var, "")
-        if val and val not in _PLACEHOLDER_VALUES:
-            if name == "gemini" and is_gemini_quota_exhausted(val):
-                console.print(
-                    "[dim yellow]Gemini: cuota agotada, probando siguiente proveedor...[/]"
-                )
-                continue
-            return name
-    return None
-
-
 def _select_provider_menu(on_vpn: bool) -> str:
     """Muestra el menú de selección de proveedor LLM."""
     from agent.storage import is_gemini_quota_exhausted, get_gemini_daily_usage
 
-    # Sin VPN o cambio de modelo: construir lista de proveedores disponibles
-    candidates = [
+    # Construir lista de proveedores disponibles.
+    # Si estamos en VPN, incluir GitHub Models como opción seleccionable
+    # para evitar que /modelo termine la app cuando solo existe GITHUB_TOKEN.
+    candidates = []
+    if on_vpn:
+        candidates.append(("vpn", "GITHUB_TOKEN"))
+    candidates.extend([
         ("gemini",   "GEMINI_API_KEY"),
         ("mistral",  "MISTRAL_API_KEY"),
         ("groq",     "GROQ_API_KEY"),
         ("cerebras", "CEREBRAS_API_KEY"),
         ("nvidia",   "NVIDIA_API_KEY"),
-    ]
+    ])
     available = []
     for name, env_var in candidates:
         val = os.environ.get(env_var, "")
@@ -475,8 +617,8 @@ def _select_provider_menu(on_vpn: bool) -> str:
     if not available:
         console.print(
             "[bold red]Error:[/] No hay ninguna API key configurada en .env\n"
-            "Configura al menos una de: [bold]GEMINI_API_KEY[/], [bold]MISTRAL_API_KEY[/], "
-            "[bold]GROQ_API_KEY[/]"
+            "Configura al menos una de: [bold]GITHUB_TOKEN[/], [bold]GEMINI_API_KEY[/], "
+            "[bold]MISTRAL_API_KEY[/], [bold]GROQ_API_KEY[/]"
         )
         sys.exit(1)
 
@@ -513,37 +655,18 @@ def _select_provider_menu(on_vpn: bool) -> str:
 def _auto_select_provider() -> str:
     """
     Detecta el entorno de red (VPN corporativa con Zscaler vs. acceso libre)
-    y selecciona el proveedor LLM.
-    - Con Zscaler → GitHub Models (acceso permitido por la VPN) — automático
-    - Sin Zscaler → menú para elegir entre los proveedores configurados en .env
+    y permite elegir proveedor LLM desde menú.
+    - Con Zscaler → menú incluyendo GitHub Models y proveedores externos configurados
+    - Sin Zscaler → menú con proveedores externos configurados
     """
     console.print("[dim]Detectando entorno de red...[/]")
     on_vpn = _detect_zscaler()
 
-    if on_vpn:
-        provider = "vpn"
-        token = os.environ.get("GITHUB_TOKEN", "")
-        if not token or token in _PLACEHOLDER_VALUES:
-            console.print(
-                "[bold red]Error:[/] Red corporativa (Zscaler) detectada, pero falta "
-                "[bold]GITHUB_TOKEN[/] en .env\n"
-                "Obtén un token gratuito en: https://github.com/settings/tokens"
-            )
-            sys.exit(1)
-        _, label, note = _PROVIDER_INFO[provider]
-        console.print(Panel.fit(
-            f"🏢  Red corporativa [dim](Zscaler detectado)[/dim]\n"
-            f"[bold green]Proveedor seleccionado:[/] {label}\n"
-            f"[dim]{note}[/dim]",
-            title="[bold blue]GarminCoach — Entorno detectado[/]",
-            border_style="blue",
-        ))
-        return provider
-
-    provider = _select_provider_menu(on_vpn=False)
+    provider = _select_provider_menu(on_vpn=on_vpn)
     _, label, note = _PROVIDER_INFO[provider]
+    network_line = "🏢  Red corporativa [dim](Zscaler detectado)[/dim]" if on_vpn else "🌐  Sin VPN corporativa"
     console.print(Panel.fit(
-        f"🌐  Sin VPN corporativa\n"
+        f"{network_line}\n"
         f"[bold green]Proveedor seleccionado:[/] {label}\n"
         f"[dim]{note}[/dim]",
         title="[bold blue]GarminCoach — Entorno detectado[/]",
@@ -553,7 +676,7 @@ def _auto_select_provider() -> str:
 
 
 def _ask_tool_mode(provider: str) -> bool:
-    """Pregunta al usuario si quiere usar Essential Tools (28) o todas las herramientas (126).
+    """Pregunta al usuario si quiere usar Essential Tools o todas las herramientas (126).
 
     Con GitHub Models (vpn) se fuerza Essential Tools: los schemas de 126 herramientas
     ya superan el límite de 8k tokens antes de enviar ninguna pregunta.
@@ -562,7 +685,7 @@ def _ask_tool_mode(provider: str) -> bool:
         console.print(Panel.fit(
             "[yellow]GitHub Models[/yellow] tiene un límite de 8 000 tokens por request.\n"
             "Con 126 herramientas los schemas solos superan ese límite, por lo que\n"
-            "se usa automáticamente [bold]Essential Tools (30 tools)[/bold].\n"
+            "se usa automáticamente [bold]Essential Tools (subset reducido)[/bold].\n"
             "[dim]Para usar todas las herramientas, sal de la VPN y reinicia (usará Gemini).[/dim]",
             title="[bold blue]GarminCoach — Herramientas[/]",
             border_style="blue",
@@ -571,7 +694,7 @@ def _ask_tool_mode(provider: str) -> bool:
 
     console.print(Panel.fit(
         "[bold]Selecciona el modo de herramientas:[/]\n\n"
-        "  [green]1[/green] · Essential Tools [dim](28 tools)[/dim]   — más rápido · menor consumo de tokens  [bold]← recomendado[/bold]\n"
+        "  [green]1[/green] · Essential Tools [dim](subset reducido)[/dim]   — más rápido · menor consumo de tokens  [bold]← recomendado[/bold]\n"
         "  [yellow]2[/yellow] · Todas          [dim](126 tools)[/dim]  — acceso completo · más tokens por petición",
         title="[bold blue]GarminCoach — Herramientas[/]",
         border_style="blue",
@@ -586,34 +709,31 @@ def _ask_tool_mode(provider: str) -> bool:
 
 
 def _check_and_migrate_supabase() -> None:
-    """
-    Comprueba la conectividad con Supabase al arrancar y muestra el estado.
-    Si Supabase acaba de conectarse y hay datos locales, los migra automáticamente.
-    """
+    """Comprueba conectividad con Supabase y exige DB activa (modo DB-first)."""
     status = check_supabase_connection()
 
     if not status["configured"]:
-        return  # Supabase no configurado, modo solo-ficheros silencioso
+        console.print("[bold red]Error:[/] Supabase no configurado. Define SUPABASE_URL y SUPABASE_ANON_KEY en .env")
+        sys.exit(1)
 
     if status["connected"]:
-        # Intentar migrar datos locales (solo mueve si la tabla está vacía para este usuario)
-        migrated = migrate_local_to_supabase()
-        migrated_items = [k for k, v in migrated.items() if v]
-        if migrated_items:
-            labels = {"profile": "perfil", "context": "historial de sesiones", "gemini": "uso de Gemini"}
-            items_str = ", ".join(labels[i] for i in migrated_items)
-            console.print(f"[green]✓[/] Supabase — datos migrados desde ficheros locales: [dim]{items_str}[/]")
-        else:
-            console.print("[green]✓[/] Supabase conectado — memoria guardada en la nube")
+        console.print("[green]✓[/] Supabase conectado — modo DB-first activo")
     else:
         console.print(
-            f"[bold yellow]⚠[/] Supabase configurado pero no accesible — "
-            f"datos guardados solo en ficheros locales\n"
+            f"[bold red]Error:[/] Supabase configurado pero no accesible\n"
             f"  [dim]Error: {status['error']}[/]"
         )
+        sys.exit(1)
 
 
 async def main() -> None:
+    # Fail-fast de infraestructura: evita pedir credenciales si la DB no está lista.
+    _check_and_migrate_supabase()
+
+    username, credentials, is_new_user = _authenticate_or_register_user()
+    _ensure_garmin_credentials(credentials)
+    _check_garmin_env()
+
     provider = _auto_select_provider()
     _check_env(provider)
     essential_only = _ask_tool_mode(provider)
@@ -633,30 +753,48 @@ async def main() -> None:
         await agent.initialize()
         console.print(f"[green]✓[/] {len(agent.tools_schema)} herramientas disponibles\n")
 
-        # Comprobar conectividad con Supabase y migrar datos locales si procede
-        _check_and_migrate_supabase()
-
-        # Paso 1: comprobar cambio de cuenta ANTES de que sync sobreescriba garmin_user_id
-        is_first = _is_first_time()
-        if is_first:
-            profile = _load_user_profile()
-            stored_uid = profile.get("garmin_user_id", "")
-            if stored_uid and stored_uid != _garmin_user_id():
-                console.print("[yellow]⚠ Cuenta de Garmin diferente detectada. Reiniciando objetivos y salud...[/]")
-                profile.pop("goals", None)
-                profile.pop("health", None)
-                profile.pop("personal", None)
-                profile.pop("setup_complete", None)
-                _save_user_profile(profile)
-
-        # Paso 2: sincronizar datos personales desde Garmin (sobreescribe garmin_user_id)
-        await _sync_from_garmin(agent)
+        # Sincronizar datos personales desde Garmin
+        profile_changes = await _sync_from_garmin(agent)
         agent.user_profile = _load_user_profile()
 
-        # Paso 3: solo la primera vez (tras haber limpiado el perfil si cambió la cuenta)
-        if is_first:
+        # Si es usuario nuevo o aún no terminó setup, completar onboarding.
+        is_first = _is_first_time()
+        if is_new_user or is_first:
             _run_first_time_setup()
             agent.user_profile = _load_user_profile()
+
+        # Inicializar/enriquecer base de conocimiento para onboarding de usuario nuevo.
+        current_kb = (load_athlete_knowledge() or "").strip()
+        if is_new_user:
+            enrichment = await agent.build_onboarding_mcp_enrichment()
+            seeded = _build_enriched_athlete_knowledge(agent.user_profile, enrichment)
+            save_athlete_knowledge(seeded)
+            console.print("[green]✓[/] Base de conocimiento inicial enriquecida y guardada.")
+            agent.knowledge_chunks.append({"source": "db:athlete_knowledge", "text": seeded[:4000]})
+            if "db:athlete_knowledge" not in agent.knowledge_sources:
+                agent.knowledge_sources.append("db:athlete_knowledge")
+        elif not current_kb:
+            enrichment = await agent.build_onboarding_mcp_enrichment()
+            seeded = _build_enriched_athlete_knowledge(agent.user_profile, enrichment)
+            save_athlete_knowledge(seeded)
+            console.print("[green]✓[/] Base de conocimiento creada desde perfil + datos MCP.")
+            agent.knowledge_chunks.append({"source": "db:athlete_knowledge", "text": seeded[:4000]})
+            if "db:athlete_knowledge" not in agent.knowledge_sources:
+                agent.knowledge_sources.append("db:athlete_knowledge")
+
+        active = get_active_user()
+        console.print(
+            f"[dim]Usuario activo: {active.get('username') or username}"
+            f" ({active.get('user_id') or 'sin-id'})[/]"
+        )
+
+        # Estado proactivo al arranque (especialmente para usuario existente).
+        try:
+            proactive_status = await agent.build_startup_status_markdown(profile_changes=profile_changes)
+            console.print(Markdown(proactive_status))
+        except Exception as status_exc:
+            console.print(f"[dim yellow]No se pudo generar el estado proactivo inicial: {status_exc}[/]")
+
         console.print("[dim dimgray][debug] Inicio de la sesión. Tokens gastados: 0[/]")
         
         daily_info = agent.get_daily_usage_info()

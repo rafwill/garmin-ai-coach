@@ -1,6 +1,6 @@
 # 🏃‍♂️ Garmin AI Coach
 
-**Garmin AI Coach** es un asistente y entrenador deportivo personal inteligente. Combina modelos de lenguaje (LLM) con tus datos deportivos reales de Garmin a través del **servidor MCP [`garmin_mcp`](https://github.com/Taxuspt/garmin_mcp)**, que se gestiona automáticamente vía `uvx` sin necesidad de instalación manual.
+**Garmin AI Coach** es un asistente y entrenador deportivo personal inteligente. Combina modelos de lenguaje (LLM) con tus datos deportivos reales de Garmin a través del **servidor MCP [`garmin_mcp`](https://github.com/Taxuspt/garmin_mcp)**, usando binario local cuando está instalado y `uvx` como fallback.
 
 El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbral de lactato, puntuación de resistencia...), tus récords personales históricos y tus actividades recientes para darte recomendaciones personalizadas, planes de entrenamiento y análisis de ritmos **100% basados en tus datos reales de Garmin Connect**. Con memoria persistente entre sesiones, recuerda lo que habéis hablado en conversaciones anteriores.
 
@@ -18,7 +18,7 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
   | 5 | **NVIDIA NIM** | `meta/llama-3.1-70b-instruct` | generoso | API key gratuita |
   | 6 | **GitHub Models** | `gpt-4o-mini` | — | GitHub token + VPN |
 
-  La red se **detecta automáticamente**: dentro de VPN corporativa (Zscaler) usa GitHub Models de forma directa; fuera, te despliega un **menú interactivo** para que selecciones el modelo que quieras usar y te permite **cambiar de modelo en caliente** en cualquier momento del chat con el comando `/modelo`.
+  La red se **detecta automáticamente** y te despliega un **menú interactivo** para que selecciones el modelo que quieras usar (también dentro de VPN corporativa con Zscaler, incluyendo GitHub Models si está configurado). Además te permite **cambiar de modelo en caliente** en cualquier momento del chat con el comando `/modelo`.
 
 * **🪵 Logging y compatibilidad Windows:**
   - El agente escribe logs en `agent.log` con timestamps y nivel de severidad.
@@ -32,9 +32,24 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
 
 * **👤 Perfil de usuario sincronizado:**
   - Al arrancar, sincroniza automáticamente género, peso, altura y edad desde Garmin Connect.
+  - Detecta y reporta cambios de perfil Garmin al inicio de sesión (si los hay).
   - Setup guiado la primera vez: deporte principal, horas/semana, próximo evento, tiempo objetivo y condiciones de salud.
   - Todos los campos del perfil se inyectan en el system prompt para que el agente te conozca desde el primer mensaje.
-  - Si cambias de cuenta de Garmin, el perfil se reinicia automáticamente.
+  - El perfil se mantiene por usuario de aplicación (multiusuario) y no se reinicia automáticamente por cambio de cuenta Garmin.
+
+* **📚 Base de conocimiento del atleta (RAG ligero):**
+  - Puedes añadir notas personales del atleta en ficheros `.md`, `.txt` o `.json`.
+  - En onboarding de usuario nuevo, se genera y persiste una base inicial enriquecida con perfil + datos MCP de arranque.
+  - En cada consulta, el agente recupera los fragmentos más relevantes y los combina con el perfil Garmin y los datos en tiempo real de herramientas.
+  - Si no defines rutas, intenta cargar automáticamente:
+    - `memory/athlete_knowledge.md`
+    - `memory/athlete_knowledge.txt`
+    - `memory/athlete_knowledge.json`
+
+* **🚦 Estado proactivo al iniciar (48h):**
+  - Tras seleccionar modelo y conectar herramientas, muestra un briefing automático de últimas 48h.
+  - Incluye estado de Body Battery, HRV, sueño y entrenamientos recientes.
+  - Sirve como punto de partida antes de la primera pregunta del chat.
 
 * **✅ Validación de inputs:**
   - `target_race_date`: formato `YYYY-MM-DD` + debe ser fecha futura.
@@ -44,16 +59,21 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
 
 * **🔐 Autenticación OAuth con Garmin:**
   - Los tokens OAuth se guardan una sola vez en `~/.garminconnect` (válidos ~6 meses).
-  - No se almacenan contraseñas en texto plano en ningún proceso del agente.
+  - La password de Garmin no se persiste en la base de datos del agente; se solicita en sesión cuando falta.
+  - Esta garantía está cubierta por tests de no-regresión en la suite de persistencia.
 
 * **💾 Memoria persistente entre sesiones:**
   - Al salir, el agente genera automáticamente un resumen compacto de la sesión con el propio LLM.
   - Los últimos 5 resúmenes se inyectan como contexto al arrancar la siguiente sesión — el agente recuerda lo que habéis hablado.
-  - Perfil en `memory/user_profile.json`; historial y resúmenes en `memory/session_context.json`.
-  - Control local de cuota de Gemini en `memory/gemini_daily_usage.json` (hash SHA-256 de la API key, nunca en claro).
+  - Todo el estado de usuario (perfil, historial, base de conocimiento y cuota de Gemini) se guarda en Supabase por usuario.
+
+* **👥 Modo multiusuario (nuevo):**
+  - Inicio con `login` o alta de `usuario nuevo` desde terminal.
+  - Cada usuario tiene su propio perfil, objetivos, contexto, base de conocimiento y claves en BBDD.
+  - En usuarios nuevos, el onboarding conecta con Garmin, sincroniza biometría y crea base de conocimiento inicial.
 
 * **🔧 Sin dependencias de Node.js:**
-  - El servidor MCP es 100% Python, lanzado automáticamente por `uvx` en un entorno aislado.
+  - El servidor MCP es 100% Python, lanzado por `garmin-mcp` local o `uvx` en fallback.
 
 ---
 
@@ -62,7 +82,7 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
 | Requisito | Versión mínima | Notas |
 |-----------|---------------|-------|
 | **Python** | 3.10+ | Desarrollado con 3.13 |
-| **uv / uvx** | cualquiera | Gestiona el servidor MCP automáticamente |
+| **uv / uvx** | cualquiera | Fallback para arrancar el servidor MCP |
 | **Cuenta Garmin Connect** | — | Credenciales de acceso |
 | **API key** de Mistral, Groq, Gemini o Cerebras | — | Gratuitas (ver `.env.example`) |
 
@@ -96,6 +116,19 @@ Edita `.env` y rellena al menos:
 
 *(Consulta los comentarios en `.env.example` para obtener las URLs de registro de cada proveedor.)*
 
+### 2.1 (Opcional) Activar base de conocimiento del atleta
+Puedes crear uno o varios ficheros con conocimiento personal (historial, preferencias, estrategia de carrera, limitaciones, nutrición, etc.) y referenciarlos en `.env`:
+
+```dotenv
+ATHLETE_KB_PATHS=memory/athlete_knowledge.md,memory/pda_strategy.json
+```
+
+Formato recomendado:
+- `.md` / `.txt`: texto libre estructurado por secciones.
+- `.json`: objetos o listas con campos descriptivos (`objetivos`, `lesiones`, `nutricion`, `estrategia_carrera`, etc.).
+
+Si no configuras `ATHLETE_KB_PATHS`, el agente intenta cargar automáticamente los ficheros por defecto en `memory/`.
+
 ### 3. Pre-autenticar con Garmin Connect *(una sola vez)*
 Este paso guarda los tokens OAuth en `~/.garminconnect` para que el agente no necesite tu contraseña en cada arranque:
 ```powershell
@@ -105,9 +138,9 @@ uvx --python 3.12 --from git+https://github.com/Taxuspt/garmin_mcp garmin-mcp-au
 ```
 > Los tokens son válidos aproximadamente **6 meses**. Repite este paso cuando expiren.
 
-### 4. (Opcional) Configurar Supabase
+### 4. Configurar Supabase (obligatorio)
 
-Sin Supabase el agente usa ficheros JSON locales. Si quieres persistencia en la nube (historial accesible desde cualquier dispositivo):
+El modo actual del agente es **DB-first multiusuario**: requiere Supabase para arrancar.
 
 1. Crea un proyecto gratuito en [supabase.com](https://supabase.com) (500 MB, sin tarjeta).
 2. Ve a **SQL Editor → New query**, pega el contenido de [`supabase/schema.sql`](supabase/schema.sql) y pulsa **Run**.
@@ -118,7 +151,18 @@ Sin Supabase el agente usa ficheros JSON locales. Si quieres persistencia en la 
    SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
    ```
 
-> Si las variables no están configuradas o Supabase falla, el agente **cae automáticamente a los ficheros locales** sin ningún error visible.
+> Si las variables no están configuradas o Supabase no es accesible, el agente mostrará error y no arrancará.
+
+Script disponible para Supabase:
+- [`supabase/schema.sql`](supabase/schema.sql): crea el esquema multiusuario para una instalacion limpia.
+
+### 5. Inicio de sesión multiusuario
+Al arrancar `python -m agent.main`:
+- Se pide `login` o `nuevo` usuario.
+- Si es `nuevo`, se crea user/pass de app y se vinculan (o introducen) credenciales Garmin.
+- Se precarga el perfil del usuario desde BBDD y se sincroniza Garmin para completar datos personales.
+- En usuarios nuevos, se crea una KB inicial enriquecida (perfil + snapshot MCP de 48h).
+- En usuarios existentes, se muestra un estado proactivo automático de 48h al inicio.
 
 ---
 
@@ -128,7 +172,7 @@ Sin Supabase el agente usa ficheros JSON locales. Si quieres persistencia en la 
 python -m agent.main
 ```
 
-El agente descargará automáticamente el servidor MCP en el primer arranque (vía `uvx`). Después aparecerá el menú de proveedores:
+El agente iniciará el servidor MCP con `garmin-mcp` local o con `uvx` como fallback. Después aparecerá el menú de proveedores:
 
 ```
   1 · GitHub Models (gpt-4o-mini)           — dentro de VPN
@@ -163,7 +207,7 @@ A continuación se selecciona el modo de herramientas y el agente conecta con Ga
 
 ---
 
-## � Servidor MCP: `garmin_mcp`
+## 🧩 Servidor MCP: `garmin_mcp`
 
 Este proyecto usa como backend el servidor MCP **[`Taxuspt/garmin_mcp`](https://github.com/Taxuspt/garmin_mcp)**, desarrollado por [Alexandre Domingues](https://github.com/Taxuspt).
 
@@ -171,7 +215,7 @@ Este proyecto usa como backend el servidor MCP **[`Taxuspt/garmin_mcp`](https://
 |---------|-------|
 | **Repositorio** | [github.com/Taxuspt/garmin_mcp](https://github.com/Taxuspt/garmin_mcp) |
 | **Herramientas** | 126 (actividades, salud, entrenamiento, workouts, nutrición…) |
-| **Transporte** | stdio (lanzado automáticamente vía `uvx`) |
+| **Transporte** | stdio (`garmin-mcp` local o `uvx` fallback) |
 | **Autenticación** | OAuth tokens en `~/.garminconnect` |
 | **Licencia** | MIT |
 
@@ -181,35 +225,33 @@ Al iniciar el agente se pregunta qué conjunto de herramientas cargar:
 
 | Modo | Herramientas | Tokens por petición | Uso recomendado |
 |------|-------------|---------------------|------------------|
-| **Essential Tools** *(default)* | ~28 | ~3-5k | Uso diario: salud, actividades, entrenamiento |
+| **Essential Tools** *(default)* | Subset reducido (configurable) | ~3-5k | Uso diario: salud, actividades, entrenamiento |
 | **Todas** | 126 | ~30k | Acceso a workouts, nutrición, challenges, gear… |
 
 Puedes fijar el subconjunto permanentemente añadiendo `GARMIN_ENABLED_TOOLS=tool1,tool2,...` en tu `.env`.
 
 ---
 
-## �📁 Estructura del Proyecto
+## 📁 Estructura del Proyecto
 
 ```
 garmin-ai-coach/
 ├── agent/
 │   ├── __init__.py
 │   ├── main.py            # Punto de entrada: menú de proveedor, herramientas, chat e interfaz de usuario.
-│   ├── mcp_client.py      # Cliente MCP asíncrono — lanza garmin_mcp vía uvx.
-│   ├── storage.py         # Capa de persistencia: Supabase (si configurado) + fallback a JSON local.
+│   ├── mcp_client.py      # Cliente MCP asíncrono — lanza garmin-mcp local o uvx (fallback).
+│   ├── storage.py         # Capa de persistencia multiusuario DB-first (Supabase).
 │   └── trainer_agent.py   # Agente: tool-calling, adaptadores LLM, lógica de conversación.
-├── memory/                # Generado automáticamente al arrancar. NO subir a git.
-│   ├── user_profile.json       # Perfil del deportista: personal, objetivos, salud.
-│   ├── session_context.json    # Historial de conversación y resúmenes de sesiones.
-│   └── gemini_daily_usage.json # Control de cuota diaria de Gemini (API key hasheada).
+├── memory/                # Base de conocimiento local opcional (RAG).
+│   └── .gitkeep
 ├── prompts/
 │   └── system_prompt.md   # Personalidad, herramientas MCP y protocolos del entrenador.
 ├── supabase/
 │   └── schema.sql         # DDL para crear las tablas en Supabase (ejecutar en SQL Editor).
 ├── tests/
 │   ├── __init__.py
-│   ├── test_trainer_agent.py  # 54 tests: funciones puras + mock de Gemini.
-│   └── test_main.py           # 39 tests: validaciones de input + lógica de identidad.
+│   ├── test_trainer_agent.py  # Tests de funciones puras + mock de Gemini.
+│   └── test_main.py           # Tests de validaciones de input + flujo principal.
 ├── .env                   # Credenciales locales (no subir a git).
 ├── .env.example           # Plantilla de configuración con comentarios.
 ├── agent.log              # Log de ejecución del agente (local, no versionar).
@@ -224,7 +266,7 @@ garmin-ai-coach/
 
 ## 🧪 Tests
 
-El proyecto incluye una suite de **93 tests unitarios** que cubre las funciones críticas sin necesidad de conexión a Garmin ni a ningún LLM.
+El proyecto incluye una suite de **116 tests unitarios** que cubre las funciones críticas sin necesidad de conexión a Garmin ni a ningún LLM.
 
 ### Instalar dependencias de desarrollo
 ```powershell
@@ -238,10 +280,10 @@ pytest
 
 ### Cobertura
 
-| Módulo | Tests | Qué cubre |
-|--------|-------|-----------|
-| `trainer_agent.py` | 54 | `_seconds_to_hhmmss`, `_normalize_date_args` (hoy/ayer/today/yesterday), `_strip_garmin_object`, `_compact_tool_result`, `_compact_personal_records` (conversión segundos→HH:MM:SS), `_clean_schema_for_gemini`, `_GeminiCompletions._parse` |
-| `main.py` | 39 | `_validate_date`, `_validate_time`, `_validate_hours`, `_garmin_user_id`, `_is_first_time` |
+| Módulo | Qué cubre |
+|--------|-----------|
+| `trainer_agent.py` | `_seconds_to_hhmmss`, `_normalize_date_args` (hoy/ayer/today/yesterday), `_strip_garmin_object`, `_compact_tool_result`, `_compact_personal_records` (conversión segundos→HH:MM:SS), `_clean_schema_for_gemini`, `_GeminiCompletions._parse`, utilidades de estado proactivo 48h |
+| `main.py` | `_validate_date`, `_validate_time`, `_validate_hours`, `_is_first_time`, construcción de KB enriquecida de onboarding |
 
 ---
 

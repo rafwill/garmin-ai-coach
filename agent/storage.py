@@ -1,60 +1,61 @@
 """
 agent/storage.py
-Capa de persistencia unificada para GarminCoach.
+Capa de persistencia multiusuario (DB-first) para GarminCoach.
 
-Usa Supabase (PostgreSQL en la nube) si SUPABASE_URL + SUPABASE_ANON_KEY
-están configurados en .env. Siempre escribe también en ficheros JSON locales
-como copia de seguridad offline.
-
-Si Supabase no está configurado o falla en una lectura, los ficheros JSON son
-la fuente de verdad (comportamiento idéntico a antes de esta migración).
-
-Tablas Supabase necesarias:
-    user_profile    — perfil personal, objetivos y salud del deportista
-    session_context — historial de conversación y resúmenes de sesiones
-    gemini_usage    — uso diario de tokens por API key (clave hasheada)
-
-Ver supabase/schema.sql para el DDL completo.
+Este módulo usa Supabase como fuente de verdad para:
+- app_user (autenticación local de la app)
+- user_profile
+- session_context
+- athlete_knowledge
+- gemini_usage
 """
 
 import hashlib
-import json
+import hmac
 import logging
 import os
-from datetime import date, datetime, timedelta
-from pathlib import Path
+from datetime import date
+from uuid import uuid4
 
 import httpx
 
 log = logging.getLogger(__name__)
 
-# ─── Rutas de ficheros locales ────────────────────────────────────────────────
-# Se usan siempre como backup, independientemente de si Supabase está activo.
-_MEMORY_DIR   = Path(__file__).parent.parent / "memory"
-_PROFILE_FILE = _MEMORY_DIR / "user_profile.json"
-_CONTEXT_FILE = _MEMORY_DIR / "session_context.json"
-_GEMINI_FILE  = _MEMORY_DIR / "gemini_daily_usage.json"
 
-_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+_zscaler_cache: bool | None = None
+_sb = None
+_sb_ready = False
+_active_user_id: str | None = None
+_active_username: str | None = None
 
 
-# ─── Detección de Zscaler (proxy SSL corporativo) ────────────────────────────
+def set_active_user(user_id: str | None, username: str | None = None) -> None:
+    """Define el usuario activo para escopar lecturas/escrituras."""
+    global _active_user_id, _active_username
+    _active_user_id = (user_id or "").strip() or None
+    _active_username = (username or "").strip().lower() or None
 
-_zscaler_cache: bool | None = None  # None = no comprobado todavía
+
+def get_active_user() -> dict:
+    """Devuelve metadatos del usuario activo en esta ejecución."""
+    return {
+        "user_id": _active_user_id,
+        "username": _active_username,
+    }
+
+
+def _require_active_user_id() -> str:
+    if not _active_user_id:
+        raise RuntimeError("No hay usuario activo en sesión")
+    return _active_user_id
 
 
 def is_zscaler_network() -> bool:
-    """
-    Detecta si el tráfico sale a través de Zscaler (proxy SSL corporativo).
-    Dos firmas posibles:
-      1. Zscaler bloquea la URL → respuesta 4xx con "Zscaler" en el cuerpo HTML.
-      2. Zscaler intercepta SSL sin bloquear → error "CERTIFICATE_VERIFY_FAILED"
-         porque inyecta su propio certificado raíz (no confiado por Python).
-    El resultado se cachea para no repetir la sonda en cada llamada.
-    """
+    """Detecta si el tráfico sale por proxy SSL corporativo Zscaler."""
     global _zscaler_cache
     if _zscaler_cache is not None:
         return _zscaler_cache
+
     try:
         with httpx.Client(timeout=4.0, follow_redirects=False, verify=True) as client:
             resp = client.get(
@@ -62,30 +63,20 @@ def is_zscaler_network() -> bool:
                 headers={"x-goog-api-key": "probe"},
             )
             body = resp.text or ""
-            _zscaler_cache = "Zscaler" in body or "zscaler" in body.lower()
-    except Exception as e:
-        err = str(e)
-        # Firma 1: nombre de Zscaler en el mensaje de error
-        # Firma 2: Python no puede verificar el certificado porque Zscaler
-        #          inyecta su propia CA raíz (no instalada en el bundle de Python)
+            _zscaler_cache = "zscaler" in body.lower()
+    except Exception as exc:
+        err = str(exc).lower()
         _zscaler_cache = (
-            "Zscaler" in err
-            or "zscaler" in err.lower()
-            or "CERTIFICATE_VERIFY_FAILED" in err
+            "zscaler" in err
+            or "certificate_verify_failed" in err
             or "unable to get local issuer certificate" in err
         )
-    log.debug("[storage] Zscaler detectado: %s", _zscaler_cache)
+
     return _zscaler_cache
 
 
-# ─── Cliente Supabase (singleton, inicialización lazy) ───────────────────────
-
-_sb       = None   # instancia del cliente supabase
-_sb_ready = False  # True después del primer intento (evita reintentos en cada llamada)
-
-
 def _supabase():
-    """Devuelve el cliente Supabase si está configurado, o None en caso contrario."""
+    """Devuelve el cliente Supabase si está configurado, o None."""
     global _sb, _sb_ready
     if _sb_ready:
         return _sb
@@ -94,363 +85,305 @@ def _supabase():
     url = os.environ.get("SUPABASE_URL", "").strip()
     key = os.environ.get("SUPABASE_ANON_KEY", "").strip()
 
-    # Detectar placeholder del .env.example
-    if not url or not key or "xxx" in url:
+    if not url or not key or "xxx" in url.lower():
         return None
 
     try:
         if is_zscaler_network():
-            # Zscaler intercepta el SSL corporativo — usar el almacén de
-            # certificados del sistema (truststore) para que httpx confíe
             import truststore
+
             truststore.inject_into_ssl()
-            log.debug("[storage] Supabase: truststore activado (Zscaler detectado)")
         from supabase import create_client
+
         _sb = create_client(url, key)
-        log.info("[storage] Supabase conectado: %s", url)
+        return _sb
     except Exception as exc:
-        log.warning("[storage] Supabase no disponible, usando ficheros locales: %s", exc)
-    return _sb
+        log.warning("[storage] Supabase no disponible: %s", exc)
+        return None
 
 
-def _garmin_uid() -> str:
-    """Identificador único del usuario basado en el email de Garmin (SHA-256[:16])."""
-    email = os.environ.get("GARMIN_EMAIL", "").strip().lower()
-    return hashlib.sha256(email.encode()).hexdigest()[:16] if email else "unknown"
+def _require_supabase():
+    sb = _supabase()
+    if not sb:
+        raise RuntimeError("Supabase no está configurado o no es accesible")
+    return sb
 
 
-# ─── Helpers de fichero ───────────────────────────────────────────────────────
-
-def _read_json(path: Path, default):
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return default
+def _normalize_username(username: str) -> str:
+    return (username or "").strip().lower()
 
 
-def _write_json(path: Path, data) -> None:
-    _MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+def _sanitize_credentials_for_storage(credentials: dict | None) -> dict:
+    """Elimina secretos que no deben persistirse en BBDD."""
+    creds = dict(credentials or {})
+    creds.pop("garmin_password", None)
+    return creds
+
+
+def _pbkdf2_hash(password: str, salt_hex: str | None = None) -> str:
+    salt = bytes.fromhex(salt_hex) if salt_hex else os.urandom(16)
+    iterations = 120_000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
     try:
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        algo, _iters, salt_hex, _digest_hex = stored.split("$", 3)
+        if algo != "pbkdf2_sha256":
+            return False
+        candidate = _pbkdf2_hash(password, salt_hex=salt_hex)
+        return hmac.compare_digest(candidate, stored)
+    except Exception:
+        return False
+
+
+def register_app_user(username: str, password: str, credentials: dict | None = None) -> dict:
+    """Crea un usuario de app y guarda password hasheada en Supabase."""
+    uname = _normalize_username(username)
+    if not uname or len(uname) < 3:
+        return {"ok": False, "user_id": None, "error": "Usuario inválido"}
+    if not password or len(password) < 6:
+        return {"ok": False, "user_id": None, "error": "Password demasiado corta (mínimo 6)"}
+
+    user_id = uuid4().hex
+    password_hash = _pbkdf2_hash(password)
+    creds = _sanitize_credentials_for_storage(credentials)
+
+    try:
+        sb = _require_supabase()
+        existing = sb.table("app_user").select("id").eq("username", uname).limit(1).execute()
+        if existing.data:
+            return {"ok": False, "user_id": None, "error": "El usuario ya existe"}
+
+        sb.table("app_user").insert(
+            {
+                "id": user_id,
+                "username": uname,
+                "password_hash": password_hash,
+                "credentials": creds,
+            }
+        ).execute()
+        return {"ok": True, "user_id": user_id, "error": None}
     except Exception as exc:
-        log.warning("[storage] No se pudo escribir %s: %s", path.name, exc)
+        return {"ok": False, "user_id": None, "error": str(exc)}
 
 
-# ─── user_profile ─────────────────────────────────────────────────────────────
+def authenticate_app_user(username: str, password: str) -> dict:
+    """Valida usuario/password contra Supabase."""
+    uname = _normalize_username(username)
+    if not uname or not password:
+        return {"ok": False, "user_id": None, "credentials": {}, "error": "Credenciales incompletas"}
+
+    try:
+        sb = _require_supabase()
+        res = sb.table("app_user").select("id,password_hash,credentials").eq("username", uname).limit(1).execute()
+        if not res.data:
+            return {"ok": False, "user_id": None, "credentials": {}, "error": "Usuario no encontrado"}
+
+        row = res.data[0]
+        if not _verify_password(password, row.get("password_hash", "")):
+            return {"ok": False, "user_id": None, "credentials": {}, "error": "Password incorrecta"}
+
+        return {
+            "ok": True,
+            "user_id": row.get("id"),
+            "credentials": row.get("credentials") or {},
+            "error": None,
+        }
+    except Exception as exc:
+        return {"ok": False, "user_id": None, "credentials": {}, "error": str(exc)}
+
+
+def update_user_credentials(credentials: dict) -> None:
+    """Actualiza credenciales auxiliares del usuario activo."""
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    sb.table("app_user").update({"credentials": _sanitize_credentials_for_storage(credentials)}).eq("id", uid).execute()
+
 
 def load_user_profile() -> dict:
-    """Carga el perfil del usuario (datos personales, objetivos, salud)."""
-    sb = _supabase()
-    if sb:
-        try:
-            uid = _garmin_uid()
-            res = sb.table("user_profile").select("data").eq("garmin_user_id", uid).execute()
-            if res.data:
-                return res.data[0].get("data") or {}
-        except Exception as exc:
-            log.warning("[storage] load_user_profile Supabase error: %s. Fallback a fichero.", exc)
-    return _read_json(_PROFILE_FILE, {})
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    res = sb.table("user_profile").select("data").eq("app_user_id", uid).limit(1).execute()
+    if not res.data:
+        return {}
+    return res.data[0].get("data") or {}
 
 
 def save_user_profile(profile: dict) -> None:
-    """Guarda el perfil del usuario. Escribe en fichero siempre; también en Supabase si disponible."""
-    _write_json(_PROFILE_FILE, profile)
-    sb = _supabase()
-    if sb:
-        try:
-            sb.table("user_profile").upsert({
-                "garmin_user_id": _garmin_uid(),
-                "data":           profile,
-            }).execute()
-        except Exception as exc:
-            log.warning("[storage] save_user_profile Supabase error: %s.", exc)
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    sb.table("user_profile").upsert({"app_user_id": uid, "data": profile or {}}).execute()
 
-
-# ─── session_context ──────────────────────────────────────────────────────────
 
 def load_session_context() -> dict:
-    """Carga el contexto de sesiones (historial de mensajes y resúmenes)."""
-    sb = _supabase()
-    if sb:
-        try:
-            uid = _garmin_uid()
-            res = sb.table("session_context") \
-                    .select("history,session_summaries") \
-                    .eq("garmin_user_id", uid) \
-                    .execute()
-            if res.data:
-                row = res.data[0]
-                return {
-                    "history":           row.get("history") or [],
-                    "session_summaries": row.get("session_summaries") or [],
-                }
-            return {"history": [], "session_summaries": []}
-        except Exception as exc:
-            log.warning("[storage] load_session_context Supabase error: %s. Fallback a fichero.", exc)
-    return _read_json(_CONTEXT_FILE, {"history": [], "session_summaries": []})
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    res = (
+        sb.table("session_context")
+        .select("history,session_summaries")
+        .eq("app_user_id", uid)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        return {"history": [], "session_summaries": []}
+    row = res.data[0]
+    return {
+        "history": row.get("history") or [],
+        "session_summaries": row.get("session_summaries") or [],
+    }
 
 
 def save_session_context(ctx: dict) -> None:
-    """Guarda el contexto de sesiones. Escribe en fichero siempre; también en Supabase si disponible."""
-    _write_json(_CONTEXT_FILE, ctx)
-    sb = _supabase()
-    if sb:
-        try:
-            sb.table("session_context").upsert({
-                "garmin_user_id":    _garmin_uid(),
-                "history":           ctx.get("history", []),
-                "session_summaries": ctx.get("session_summaries", []),
-            }).execute()
-        except Exception as exc:
-            log.warning("[storage] save_session_context Supabase error: %s.", exc)
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    sb.table("session_context").upsert(
+        {
+            "app_user_id": uid,
+            "history": ctx.get("history", []),
+            "session_summaries": ctx.get("session_summaries", []),
+        }
+    ).execute()
 
 
 def save_history_entry(role: str, content: str) -> None:
-    """Añade una entrada al historial de conversación persistente."""
     ctx = load_session_context()
     ctx.setdefault("history", []).append({"role": role, "content": content})
-    ctx["history"] = ctx["history"][-50:]  # últimas 50 entradas
+    ctx["history"] = ctx["history"][-50:]
     save_session_context(ctx)
 
 
 def load_session_summaries() -> list[dict]:
-    """Carga los resúmenes de sesiones anteriores."""
     return load_session_context().get("session_summaries", [])
 
 
 def persist_session_summary(summary: str) -> None:
-    """Guarda el resumen de la sesión actual en el contexto persistente."""
     ctx = load_session_context()
     summaries = ctx.get("session_summaries", [])
-    summaries.append({"date": date.today().isoformat(), "summary": summary[:600]})
-    ctx["session_summaries"] = summaries[-10:]  # últimos 10 resúmenes
+    summaries.append({"date": date.today().isoformat(), "summary": (summary or "")[:600]})
+    ctx["session_summaries"] = summaries[-10:]
     save_session_context(ctx)
 
 
-# ─── gemini_usage ─────────────────────────────────────────────────────────────
+def load_athlete_knowledge() -> str:
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    res = sb.table("athlete_knowledge").select("content").eq("app_user_id", uid).limit(1).execute()
+    if not res.data:
+        return ""
+    return (res.data[0].get("content") or "").strip()
+
+
+def save_athlete_knowledge(content: str) -> None:
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    sb.table("athlete_knowledge").upsert({"app_user_id": uid, "content": (content or "").strip()}).execute()
+
 
 def _key_hash(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
 
 def get_gemini_daily_usage(api_key: str) -> int:
-    """Obtiene los tokens consumidos hoy para una API key específica."""
     if not api_key:
         return 0
-    kh    = _key_hash(api_key)
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    kh = _key_hash(api_key)
     today = date.today().isoformat()
-    sb = _supabase()
-    if sb:
-        try:
-            res = sb.table("gemini_usage") \
-                    .select("tokens") \
-                    .eq("key_hash", kh) \
-                    .eq("usage_date", today) \
-                    .execute()
-            if res.data:
-                return res.data[0].get("tokens", 0)
-            return 0
-        except Exception as exc:
-            log.warning("[storage] get_gemini_daily_usage Supabase error: %s. Fallback a fichero.", exc)
-    # Fallback a fichero
-    data     = _read_json(_GEMINI_FILE, {})
-    day_data = data.get(kh, {}).get(today, 0)
-    return day_data.get("tokens", 0) if isinstance(day_data, dict) else day_data
+    res = (
+        sb.table("gemini_usage")
+        .select("tokens")
+        .eq("app_user_id", uid)
+        .eq("key_hash", kh)
+        .eq("usage_date", today)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        return 0
+    return int(res.data[0].get("tokens", 0) or 0)
 
 
 def update_gemini_daily_usage(api_key: str, tokens: int) -> int:
-    """Actualiza y devuelve los tokens acumulados hoy para una API key específica."""
     if not api_key or tokens <= 0:
         return get_gemini_daily_usage(api_key)
-    kh        = _key_hash(api_key)
-    today     = date.today().isoformat()
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    kh = _key_hash(api_key)
+    today = date.today().isoformat()
     new_total = get_gemini_daily_usage(api_key) + tokens
-    sb = _supabase()
-    if sb:
-        try:
-            sb.table("gemini_usage").upsert({
-                "key_hash":   kh,
-                "usage_date": today,
-                "tokens":     new_total,
-            }).execute()
-        except Exception as exc:
-            log.warning("[storage] update_gemini_daily_usage Supabase error: %s.", exc)
-    _update_gemini_file(api_key, new_total, quota_exhausted=False)
+    sb.table("gemini_usage").upsert(
+        {
+            "app_user_id": uid,
+            "key_hash": kh,
+            "usage_date": today,
+            "tokens": new_total,
+        }
+    ).execute()
     return new_total
 
 
 def mark_gemini_quota_exhausted(api_key: str) -> None:
-    """Marca la API key como agotada por cuota para el día de hoy."""
     if not api_key:
         return
-    kh     = _key_hash(api_key)
-    today  = date.today().isoformat()
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    kh = _key_hash(api_key)
+    today = date.today().isoformat()
     tokens = max(get_gemini_daily_usage(api_key), 1_000_000)
-    sb = _supabase()
-    if sb:
-        try:
-            sb.table("gemini_usage").upsert({
-                "key_hash":        kh,
-                "usage_date":      today,
-                "tokens":          tokens,
-                "quota_exhausted": True,
-            }).execute()
-        except Exception as exc:
-            log.warning("[storage] mark_gemini_quota_exhausted Supabase error: %s.", exc)
-    _update_gemini_file(api_key, tokens, quota_exhausted=True)
+    sb.table("gemini_usage").upsert(
+        {
+            "app_user_id": uid,
+            "key_hash": kh,
+            "usage_date": today,
+            "tokens": tokens,
+            "quota_exhausted": True,
+        }
+    ).execute()
 
 
 def is_gemini_quota_exhausted(api_key: str) -> bool:
-    """Devuelve True si la API key está marcada como agotada por cuota hoy."""
     if not api_key:
         return False
-    kh    = _key_hash(api_key)
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    kh = _key_hash(api_key)
     today = date.today().isoformat()
-    sb = _supabase()
-    if sb:
-        try:
-            res = sb.table("gemini_usage") \
-                    .select("quota_exhausted") \
-                    .eq("key_hash", kh) \
-                    .eq("usage_date", today) \
-                    .execute()
-            if res.data:
-                return bool(res.data[0].get("quota_exhausted", False))
-            return False
-        except Exception as exc:
-            log.warning("[storage] is_gemini_quota_exhausted Supabase error: %s.", exc)
-    # Fallback a fichero
-    data     = _read_json(_GEMINI_FILE, {})
-    day_data = data.get(kh, {}).get(today, {})
-    return bool(day_data.get("quota_exhausted", False)) if isinstance(day_data, dict) else False
+    res = (
+        sb.table("gemini_usage")
+        .select("quota_exhausted")
+        .eq("app_user_id", uid)
+        .eq("key_hash", kh)
+        .eq("usage_date", today)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        return False
+    return bool(res.data[0].get("quota_exhausted", False))
 
 
 def check_supabase_connection() -> dict:
-    """
-    Comprueba la conectividad con Supabase haciendo una query real.
-    Resetea el singleton para forzar un intento limpio.
-
-    Returns:
-        {
-            "configured": bool,   # URL + KEY presentes y no son placeholders
-            "connected":  bool,   # query de ping OK
-            "error":      str|None,
-        }
-    """
+    """Comprueba conectividad con Supabase haciendo una query real."""
     global _sb, _sb_ready
 
     url = os.environ.get("SUPABASE_URL", "").strip()
     key = os.environ.get("SUPABASE_ANON_KEY", "").strip()
 
-    if not url or not key or "xxx" in url or url.endswith(".supabase.co") is False:
+    if not url or not key or "xxx" in url.lower():
         return {"configured": False, "connected": False, "error": None}
 
-    # Forzar nuevo intento de conexión
     _sb_ready = False
-    _sb       = None
-    sb        = _supabase()
-
+    _sb = None
+    sb = _supabase()
     if sb is None:
         return {"configured": True, "connected": False, "error": "No se pudo crear el cliente Supabase"}
 
     try:
-        sb.table("user_profile").select("garmin_user_id").limit(1).execute()
+        sb.table("app_user").select("id").limit(1).execute()
         return {"configured": True, "connected": True, "error": None}
     except Exception as exc:
-        err = str(exc)
-        return {"configured": True, "connected": False, "error": err}
-
-
-def migrate_local_to_supabase() -> dict:
-    """
-    Migra los datos de los ficheros JSON locales a Supabase si:
-      - Supabase está configurado y accesible.
-      - La tabla destino está vacía para este usuario (evita sobreescribir).
-
-    Returns:
-        {"profile": bool, "context": bool, "gemini": bool}
-        True = se migró ese tipo de dato, False = no era necesario o falló.
-    """
-    result = {"profile": False, "context": False, "gemini": False}
-    sb = _supabase()
-    if not sb:
-        return result
-
-    uid = _garmin_uid()
-
-    # ── Perfil ──────────────────────────────────────────────────────────────
-    try:
-        existing = sb.table("user_profile").select("garmin_user_id").eq("garmin_user_id", uid).execute()
-        if not existing.data and _PROFILE_FILE.exists():
-            local_profile = _read_json(_PROFILE_FILE, {})
-            if local_profile:
-                sb.table("user_profile").upsert({
-                    "garmin_user_id": uid,
-                    "data":           local_profile,
-                }).execute()
-                result["profile"] = True
-    except Exception as exc:
-        log.warning("[storage] migrate profile error: %s", exc)
-
-    # ── Contexto de sesión ───────────────────────────────────────────────────
-    try:
-        existing = sb.table("session_context").select("garmin_user_id").eq("garmin_user_id", uid).execute()
-        if not existing.data and _CONTEXT_FILE.exists():
-            local_ctx = _read_json(_CONTEXT_FILE, {})
-            if local_ctx.get("history") or local_ctx.get("session_summaries"):
-                sb.table("session_context").upsert({
-                    "garmin_user_id":    uid,
-                    "history":           local_ctx.get("history", []),
-                    "session_summaries": local_ctx.get("session_summaries", []),
-                }).execute()
-                result["context"] = True
-    except Exception as exc:
-        log.warning("[storage] migrate context error: %s", exc)
-
-    # ── Uso de Gemini ────────────────────────────────────────────────────────
-    try:
-        if _GEMINI_FILE.exists():
-            local_gemini = _read_json(_GEMINI_FILE, {})
-            today = date.today().isoformat()
-            for kh, days in local_gemini.items():
-                if today in days:
-                    day_data = days[today]
-                    tokens   = day_data.get("tokens", 0) if isinstance(day_data, dict) else int(day_data)
-                    if tokens > 0:
-                        existing = sb.table("gemini_usage") \
-                                     .select("key_hash") \
-                                     .eq("key_hash", kh) \
-                                     .eq("usage_date", today) \
-                                     .execute()
-                        if not existing.data:
-                            sb.table("gemini_usage").upsert({
-                                "key_hash":        kh,
-                                "usage_date":      today,
-                                "tokens":          tokens,
-                                "quota_exhausted": day_data.get("quota_exhausted", False) if isinstance(day_data, dict) else False,
-                            }).execute()
-                            result["gemini"] = True
-    except Exception as exc:
-        log.warning("[storage] migrate gemini error: %s", exc)
-
-    return result
-
-
-def _update_gemini_file(api_key: str, tokens: int, quota_exhausted: bool) -> None:
-    """Actualiza el fichero local de uso de Gemini."""
-    kh        = _key_hash(api_key)
-    today_str = date.today().isoformat()
-    data      = _read_json(_GEMINI_FILE, {})
-    data.setdefault(kh, {})[today_str] = {"tokens": tokens, "quota_exhausted": quota_exhausted}
-    # Limpiar entradas con más de 30 días de antigüedad
-    try:
-        cutoff = (datetime.now() - timedelta(days=30)).date().isoformat()
-        for kh2 in list(data.keys()):
-            for d_str in list(data.get(kh2, {}).keys()):
-                if d_str < cutoff:
-                    del data[kh2][d_str]
-    except Exception:
-        pass
-    _write_json(_GEMINI_FILE, data)
+        return {"configured": True, "connected": False, "error": str(exc)}

@@ -38,7 +38,7 @@ def _get_server_params(essential_only: bool = True) -> StdioServerParameters:
         use_uvx = True
 
     # Herramientas esenciales para un agente entrenador personal.
-    # Reduce el contexto de ~31k tokens (126 tools) a ~5k tokens (~25 tools).
+    # Reduce el contexto de ~31k tokens (126 tools) a ~5k tokens (~31 tools).
     # Se puede sobreescribir con la variable GARMIN_ENABLED_TOOLS en .env.
     _DEFAULT_TOOLS = (
         # Perfil personal del usuario
