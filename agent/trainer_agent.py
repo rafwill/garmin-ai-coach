@@ -265,17 +265,80 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
             return _compact_personal_records(data)
         # Añadir campos normalizados útiles para análisis de actividades
         if tool_name == "get_activity" and isinstance(data, dict):
-            duration = data.get("duration") or data.get("movingDuration")
-            distance = data.get("distance")
+            # Duración (segundos -> HH:MM:SS)
+            duration = data.get("duration") or data.get("movingDuration") or data.get("duration_seconds")
+            distance = data.get("distance") or data.get("distance_meters")
+            avg_hr   = data.get("avgHr") or data.get("avg_hr_bpm") or data.get("averageHR")
+            max_hr   = data.get("maxHr") or data.get("max_hr_bpm") or data.get("maxHR")
+            avg_spd  = data.get("avgSpeed") or data.get("averageSpeed")
             try:
                 if duration is not None:
-                    data["duration_hhmmss"] = _seconds_to_hhmmss(float(duration))
+                    dur_s = float(duration)
+                    data["duration_hhmmss"] = _seconds_to_hhmmss(dur_s)
+                    data["duration_hours"]  = round(dur_s / 3600, 2)
             except (ValueError, TypeError):
-                pass
+                dur_s = None
+            else:
+                dur_s = float(duration) if duration is not None else None
             try:
                 if distance is not None:
-                    data["distance_km"] = round(float(distance) / 1000, 2)
+                    dist_km = float(distance) / 1000
+                    data["distance_km"] = round(dist_km, 2)
+                    if dur_s and dist_km > 0:
+                        pace_s_per_km = dur_s / dist_km
+                        pace_min = int(pace_s_per_km // 60)
+                        pace_sec = int(pace_s_per_km % 60)
+                        data["ritmo_medio_min_km"] = f"{pace_min}:{pace_sec:02d} min/km"
             except (ValueError, TypeError):
+                pass
+            # Calcular zonas de FC estimadas (necesita FCmax y FCmedia)
+            try:
+                if avg_hr and max_hr:
+                    fcmax = float(max_hr)
+                    fcmed = float(avg_hr)
+                    z_bounds = [
+                        ("Z1_recuperacion", 0,    0.60),
+                        ("Z2_base_aerobica", 0.60, 0.70),
+                        ("Z3_umbral_aerobico", 0.70, 0.80),
+                        ("Z4_umbral_anaerobico", 0.80, 0.90),
+                        ("Z5_vo2max", 0.90, 1.10),
+                    ]
+                    # Estimacion naive: distribucion gaussiana centrada en FC_media
+                    # con sigma ~10% FCmax. Normalizada a 100%.
+                    import math
+                    sigma = 0.10 * fcmax
+                    def normal_cdf(x, mu, s):
+                        return 0.5 * (1 + math.erf((x - mu) / (s * math.sqrt(2))))
+                    zone_pct = {}
+                    total = 0.0
+                    for name, lo_pct, hi_pct in z_bounds:
+                        lo_bpm = lo_pct * fcmax
+                        hi_bpm = hi_pct * fcmax
+                        p = normal_cdf(hi_bpm, fcmed, sigma) - normal_cdf(lo_bpm, fcmed, sigma)
+                        zone_pct[name] = round(max(p, 0) * 100, 1)
+                        total += zone_pct[name]
+                    # Normalizar a 100%
+                    if total > 0:
+                        zone_pct = {k: round(v / total * 100, 1) for k, v in zone_pct.items()}
+                    if dur_s:
+                        for name, pct in zone_pct.items():
+                            mins = round(dur_s * pct / 100 / 60, 0)
+                            zone_pct[name] = f"{pct}% (~{int(mins)} min)"
+                    data["zonas_fc_estimadas"] = zone_pct
+                    data["nota_zonas"] = (
+                        f"Estimacion basada en FC_media={int(fcmed)}bpm y FC_max={int(fcmax)}bpm. "
+                        "Para zonas exactas consultar datos de hrTimeInZones si disponibles."
+                    )
+            except Exception:
+                pass
+            # Hidratacion estimada
+            try:
+                if dur_s:
+                    dur_h = dur_s / 3600
+                    hydration_low  = round(dur_h * 0.5, 1)
+                    hydration_high = round(dur_h * 0.8, 1)
+                    data["hidratacion_estimada_litros"] = f"{hydration_low}-{hydration_high}L (base; +25% si temp >25C)"
+            except Exception:
                 pass
         if isinstance(data, list):
             data = data[:8]  # máximo 8 elementos de arrays
@@ -562,6 +625,125 @@ def _build_proactive_status_markdown(snapshot: dict) -> str:
         "- Usa este estado como base para ajustar la sesion de hoy antes de pedir un plan detallado.",
     ])
     return "\n".join(lines)
+
+
+def _is_generic_needs_more_info_reply(text: str) -> bool:
+    """Detecta respuestas genéricas de "falta información" cuando ya hay contexto suficiente."""
+    raw = (text or "").strip().lower()
+    if not raw:
+        return False
+    markers = [
+        "no puedo crear una planificación",
+        "no puedo analizar",
+        "sin más información",
+        "proporciona más detalles",
+        "por favor, proporciona más",
+    ]
+    return any(marker in raw for marker in markers)
+
+
+def _is_planning_intent(user_message: str) -> bool:
+    """Detecta intención de planificación en la consulta del usuario."""
+    text = (user_message or "").strip().lower()
+    if not text:
+        return False
+    planning_markers = [
+        "plan", "planifica", "planificación", "planificacion",
+        "objetivo", "preparar", "preparación", "preparacion",
+        "macro", "microciclo", "semana", "bloque",
+    ]
+    return any(marker in text for marker in planning_markers)
+
+
+def _has_goal_in_profile(profile: dict) -> bool:
+    """Comprueba si el perfil ya contiene un objetivo útil para planificar."""
+    goals = (profile or {}).get("goals", {})
+    return bool(
+        goals.get("target_race")
+        or goals.get("target_race_date")
+        or goals.get("target_time")
+        or goals.get("weekly_training_hours")
+    )
+
+
+def _build_goal_plan_fallback(profile: dict) -> str:
+    """Genera una planificación base útil usando el objetivo guardado en el perfil."""
+    goals = (profile or {}).get("goals", {})
+    health = (profile or {}).get("health", {})
+
+    race = goals.get("target_race") or "tu evento objetivo"
+    race_date = goals.get("target_race_date") or "fecha por confirmar"
+    target_time = goals.get("target_time") or "tiempo por definir"
+    weekly_hours = goals.get("weekly_training_hours") or "8-10"
+    injuries = ", ".join(health.get("injuries", [])) if health.get("injuries") else "ninguna relevante"
+
+    return (
+        "## Planificación Inicial para tu Objetivo\n\n"
+        f"- Evento objetivo: {race}\n"
+        f"- Fecha objetivo: {race_date}\n"
+        f"- Tiempo objetivo: {target_time}\n"
+        f"- Horas semanales estimadas: {weekly_hours}\n"
+        f"- Condiciones de salud declaradas: {injuries}\n\n"
+        "### Estructura semanal propuesta (base)\n"
+        "- Lunes: descanso o movilidad + fuerza 30-40 min\n"
+        "- Martes: calidad (intervalos/umbral)\n"
+        "- Miércoles: rodaje Z2 suave\n"
+        "- Jueves: calidad controlada (tempo o cuestas)\n"
+        "- Viernes: descanso activo\n"
+        "- Sábado: tirada larga progresiva\n"
+        "- Domingo: rodaje de recuperación + técnica\n\n"
+        "### Próximos pasos\n"
+        "- En la siguiente interacción ajustaré paces, volúmenes y progresión según tus datos Garmin recientes "
+        "(carga, HRV, sueño y entrenamientos)."
+    )
+
+
+def _normalize_trend_date_range(tool_name: str, arguments: dict) -> dict:
+    """Ajusta rangos de fechas para herramientas trend según límites MCP."""
+    if not isinstance(arguments, dict):
+        return {}
+
+    max_days_by_tool = {
+        "get_training_load_trend": 90,
+        "get_vo2max_trend": 90,
+        "get_hrv_trend": 30,
+    }
+    max_days = max_days_by_tool.get(tool_name)
+    if not max_days:
+        return arguments
+
+    args = dict(arguments)
+    today = date.today()
+
+    start_key = "start_date" if "start_date" in args else "startDate" if "startDate" in args else None
+    end_key = "end_date" if "end_date" in args else "endDate" if "endDate" in args else None
+    if not start_key and not end_key:
+        return args
+
+    def _to_date(value: Any) -> date | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+
+    end_date = _to_date(args.get(end_key)) if end_key else None
+    start_date = _to_date(args.get(start_key)) if start_key else None
+
+    if end_date is None or end_date > today:
+        end_date = today
+    if start_date is None or start_date > end_date:
+        start_date = end_date - timedelta(days=max_days)
+
+    if (end_date - start_date).days > max_days:
+        start_date = end_date - timedelta(days=max_days)
+
+    if start_key:
+        args[start_key] = start_date.isoformat()
+    if end_key:
+        args[end_key] = end_date.isoformat()
+    return args
 
 
 # ─── Cliente Gemini (SDK oficial google-genai, soporta claves AQ.) ────────────
@@ -1003,46 +1185,125 @@ def _extract_iso_date_from_text(value: str) -> str | None:
 
 
 def _extract_activity_date_iso(activity: dict) -> str | None:
-    """Obtiene la fecha ISO de una actividad Garmin a partir de sus campos de inicio."""
+    """Obtiene la fecha ISO de una actividad Garmin a partir de sus campos de inicio.
+    Soporta:
+    - ISO strings: '2026-07-02T08:30:00' o '2026-07-02 08:30:00'
+    - Solo fecha: '2026-07-02'
+    - Epoch en milisegundos (int o string): 1751414400000
+    - Epoch en segundos (int o string): 1751414400
+    """
     if not isinstance(activity, dict):
         return None
 
-    for key in ("startTimeLocal", "startTimeGMT", "startTimeUTC", "startTime", "calendarDate"):
+    for key in ("startTimeLocal", "startTimeGMT", "startTimeUTC", "startTime", "start_time",
+                "calendarDate", "beginTimestamp", "activitySummary"):
         value = activity.get(key)
-        if isinstance(value, str) and len(value) >= 10:
-            date_str = value[:10]
+        if value is None:
+            continue
+
+        # String con fecha ISO o similar
+        if isinstance(value, str):
+            s = value.strip()
+            if len(s) >= 10:
+                date_str = s[:10].replace(" ", "-")  # '2026 07 02' -> '2026-07-02'
+                try:
+                    return date.fromisoformat(date_str).isoformat()
+                except ValueError:
+                    pass
+            # Epoch como string
+            if s.isdigit() and len(s) >= 10:
+                try:
+                    ts = int(s)
+                    if ts > 10_000_000_000:   # milisegundos
+                        ts //= 1000
+                    return datetime.utcfromtimestamp(ts).date().isoformat()
+                except (ValueError, OSError, OverflowError):
+                    pass
+
+        # Epoch numérico
+        if isinstance(value, (int, float)) and value > 0:
             try:
-                return date.fromisoformat(date_str).isoformat()
-            except ValueError:
-                continue
+                ts = int(value)
+                if ts > 10_000_000_000:   # milisegundos
+                    ts //= 1000
+                return datetime.utcfromtimestamp(ts).date().isoformat()
+            except (ValueError, OSError, OverflowError):
+                pass
+
     return None
+
+
+def _parse_activities_response(raw: str | None) -> tuple[list[dict], bool, int]:
+    """Parsea la respuesta de get_activities en (activities, has_more, next_start).
+    Soporta tanto array JSON directo como objeto {activities: [...]}
+    """
+    if not raw or not raw.strip():
+        return [], False, 0
+    stripped = raw.strip()
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return [], False, 0
+
+    # Formato lista directa: [{...}, {...}]
+    if isinstance(data, list):
+        activities = [a for a in data if isinstance(a, dict)]
+        print(f"  [debug] get_activities -> lista directa con {len(activities)} actividades")
+        return activities, False, 0
+
+    # Formato objeto: {"activities": [...], "has_more": ..., "next_start": ...}
+    if isinstance(data, dict):
+        # Algunos servidores MCP devuelven las actividades bajo distintas claves
+        activities = data.get("activities") or data.get("activityList") or data.get("list") or []
+        if not isinstance(activities, list):
+            activities = []
+        activities = [a for a in activities if isinstance(a, dict)]
+        has_more = bool(data.get("has_more") or data.get("hasMore"))
+        next_start = int(data.get("next_start") or data.get("nextStart") or 0)
+        print(f"  [debug] get_activities -> objeto con {len(activities)} actividades, has_more={has_more}")
+        return activities, has_more, next_start
+
+    return [], False, 0
 
 
 async def _find_activity_id_by_date(mcp_session: ClientSession, target_date_iso: str) -> int | None:
     """Busca en actividades recientes el activity_id correspondiente a una fecha ISO."""
     start = 0
     limit = 100
-    max_pages = 6  # hasta 600 actividades recientes
+    max_pages = 30  # hasta 3000 actividades para cubrir historiales amplios
 
-    for _ in range(max_pages):
+    for page_num in range(max_pages):
         raw = await call_tool(mcp_session, "get_activities", {"start": str(start), "limit": str(limit)})
-        data = json.loads(raw) if raw and raw.strip().startswith("{") else {}
-        activities = data.get("activities", []) if isinstance(data, dict) else []
+        activities, has_more, next_start = _parse_activities_response(raw)
+
+        if page_num == 0 and activities:
+            sample = activities[0]
+            # Debug exhaustivo: muestra TODOS los keys y los valores de fecha para diagnóstico
+            all_keys = list(sample.keys())
+            print(f"  [debug] Primera actividad keys: {all_keys}")
+            date_fields = {k: sample.get(k) for k in all_keys if any(x in k.lower() for x in ("time", "date", "start", "timestamp", "calendar"))}
+            act_id_debug = sample.get("activityId") or sample.get("id") or sample.get("activity_id")
+            print(f"  [debug] activityId={act_id_debug} campos_fecha={date_fields}")
 
         for activity in activities:
-            if _extract_activity_date_iso(activity) != target_date_iso:
+            act_date = _extract_activity_date_iso(activity)
+            act_id = activity.get("activityId") or activity.get("activity_id") or activity.get("id")
+            if act_date:
+                print(f"  [debug] Comparando actividad {act_id}: fecha_extraida={act_date} vs target={target_date_iso}")
+            if act_date != target_date_iso:
                 continue
-
             activity_id = activity.get("activityId") or activity.get("activity_id") or activity.get("id")
             try:
                 return int(activity_id)
             except (TypeError, ValueError):
                 continue
 
-        has_more = bool(data.get("has_more")) if isinstance(data, dict) else False
         if not has_more:
             break
-        start = int(data.get("next_start", start + limit))
+        new_start = next_start if next_start > start else start + limit
+        if new_start <= start:  # paginación rota: el servidor no avanza
+            break
+        start = new_start
 
     return None
 
@@ -1062,12 +1323,11 @@ async def _find_activity_id_by_name(mcp_session: ClientSession, name_hint: str) 
 
     start = 0
     limit = 100
-    max_pages = 6  # hasta 600 actividades recientes
+    max_pages = 30  # hasta 3000 actividades para cubrir historiales amplios
 
     for _ in range(max_pages):
         raw = await call_tool(mcp_session, "get_activities", {"start": str(start), "limit": str(limit)})
-        data = json.loads(raw) if raw and raw.strip().startswith("{") else {}
-        activities = data.get("activities", []) if isinstance(data, dict) else []
+        activities, has_more, next_start_val = _parse_activities_response(raw)
 
         best_id = None
         best_score = -1
@@ -1107,12 +1367,270 @@ async def _find_activity_id_by_name(mcp_session: ClientSession, name_hint: str) 
         if best_id is not None and best_score >= 70:
             return best_id
 
-        has_more = bool(data.get("has_more")) if isinstance(data, dict) else False
         if not has_more:
             break
-        start = int(data.get("next_start", start + limit))
+        start = next_start_val if next_start_val > start else start + limit
 
     return None
+
+
+def _build_activity_analysis_block(
+    activity_raw: str,
+    body_battery_raw: str | None = None,
+    sleep_raw: str | None = None,
+    hrv_raw: str | None = None,
+    training_load_raw: str | None = None,
+) -> str:
+    """Construye un bloque de análisis pre-computado en Python para inyectar al LLM.
+
+    Calcula métricas derivadas (ritmo, zonas FC, hidratación, carga) directamente
+    en Python para que el LLM solo aporte interpretación y coaching, no cálculos.
+    """
+    import math
+
+    lines: list[str] = []
+
+    # ── Parsear actividad ──────────────────────────────────────────────────
+    try:
+        act = json.loads(activity_raw) if activity_raw else {}
+    except Exception:
+        act = {}
+
+    name     = act.get("name") or act.get("activityName") or "Actividad"
+    act_type = act.get("type") or act.get("activityType") or ""
+    dur_s_raw = (act.get("duration") or act.get("duration_seconds")
+                 or act.get("movingDuration") or act.get("moving_duration_seconds"))
+    dist_m_raw = act.get("distance") or act.get("distance_meters")
+    avg_hr   = act.get("avgHr") or act.get("avg_hr_bpm") or act.get("averageHR")
+    max_hr   = act.get("maxHr") or act.get("max_hr_bpm") or act.get("maxHR")
+    min_hr   = act.get("minHr") or act.get("min_hr_bpm") or act.get("minHR")
+    calories = act.get("calories") or act.get("activeKilocalories") or act.get("activeCalories")
+    elev_gain = act.get("elevationGain") or act.get("elevation_gain_meters") or act.get("totalAscent")
+    elev_loss = act.get("elevationLoss") or act.get("elevation_loss_meters") or act.get("totalDescent")
+    train_effect = act.get("trainingEffect") or act.get("aerobicTrainingEffect")
+    train_load   = act.get("activityTrainingLoad") or act.get("trainingLoadScore")
+    mod_mins = act.get("moderateIntensityMinutes") or act.get("vigorousIntensityMinutes")
+
+    # ── Conversiones base ─────────────────────────────────────────────────
+    try:
+        dur_s = float(dur_s_raw) if dur_s_raw is not None else None
+    except (ValueError, TypeError):
+        dur_s = None
+    try:
+        dist_km = float(dist_m_raw) / 1000 if dist_m_raw is not None else None
+    except (ValueError, TypeError):
+        dist_km = None
+    try:
+        avg_hr_f = float(avg_hr) if avg_hr is not None else None
+        max_hr_f = float(max_hr) if max_hr is not None else None
+    except (ValueError, TypeError):
+        avg_hr_f = max_hr_f = None
+
+    # ── Sección 1: Resumen básico ──────────────────────────────────────────
+    lines.append("=== RESUMEN DE ACTIVIDAD (calculado) ===")
+    lines.append(f"Nombre: {name}")
+    if act_type:
+        lines.append(f"Tipo: {act_type}")
+    if dur_s:
+        lines.append(f"Duracion: {_seconds_to_hhmmss(dur_s)}")
+        lines.append(f"Duracion total: {dur_s:.0f} segundos ({dur_s/3600:.2f} horas)")
+    if dist_km:
+        lines.append(f"Distancia: {dist_km:.2f} km")
+    if dur_s and dist_km and dist_km > 0:
+        pace_s = dur_s / dist_km
+        lines.append(f"Ritmo medio: {int(pace_s//60)}:{int(pace_s%60):02d} min/km")
+    if avg_hr_f:
+        lines.append(f"FC media: {avg_hr_f:.0f} bpm")
+    if max_hr_f:
+        lines.append(f"FC maxima: {max_hr_f:.0f} bpm")
+    if min_hr is not None:
+        lines.append(f"FC minima: {min_hr} bpm")
+    if elev_gain:
+        lines.append(f"Desnivel positivo: {float(elev_gain):.0f} m")
+    if elev_loss:
+        lines.append(f"Desnivel negativo: {float(elev_loss):.0f} m")
+    if calories:
+        lines.append(f"Calorias: {float(calories):.0f} kcal")
+
+    # ── Sección 2: Zonas de FC estimadas ──────────────────────────────────
+    if avg_hr_f and max_hr_f and dur_s:
+        lines.append("")
+        lines.append("=== ZONAS DE FRECUENCIA CARDIACA (estimacion por distribucion gaussiana) ===")
+        lines.append(f"FCmax observada: {max_hr_f:.0f} bpm | FC media: {avg_hr_f:.0f} bpm")
+        sigma = 0.10 * max_hr_f
+        zone_defs = [
+            ("Z1 Recuperacion     (<60% FC)", 0.00 * max_hr_f, 0.60 * max_hr_f),
+            ("Z2 Base aerobica (60-70% FC)",  0.60 * max_hr_f, 0.70 * max_hr_f),
+            ("Z3 Umbral aerobico (70-80%FC)", 0.70 * max_hr_f, 0.80 * max_hr_f),
+            ("Z4 Umbral anaer.  (80-90% FC)", 0.80 * max_hr_f, 0.90 * max_hr_f),
+            ("Z5 VO2max          (>90% FC)",  0.90 * max_hr_f, 2.00 * max_hr_f),
+        ]
+        def ncdf(x, mu, s):
+            return 0.5 * (1 + math.erf((x - mu) / (s * math.sqrt(2))))
+        raw_pcts = []
+        for _, lo, hi in zone_defs:
+            p = ncdf(hi, avg_hr_f, sigma) - ncdf(lo, avg_hr_f, sigma)
+            raw_pcts.append(max(p, 0))
+        total_p = sum(raw_pcts) or 1.0
+        for i, (zname, _, _) in enumerate(zone_defs):
+            pct = raw_pcts[i] / total_p * 100
+            mins = dur_s * raw_pcts[i] / total_p / 60
+            lines.append(f"  {zname}: {pct:.1f}%  (~{mins:.0f} min)")
+
+    # ── Sección 3: Efecto de entrenamiento y carga ────────────────────────
+    # Extraer también efecto anaeróbico y label para formatearlos en Python
+    anaer_effect  = act.get("anaerobicTrainingEffect") or act.get("anaerobic_training_effect")
+    effect_label  = (act.get("activityTrainingEffectLabel") or act.get("trainingEffectLabel")
+                     or act.get("training_effect_label"))
+    _effect_labels_es = {
+        "AEROBIC_BASE":   "construccion base aerobica",
+        "RECOVERY":       "recuperacion",
+        "TEMPO":          "mejora de ritmo/tempo",
+        "THRESHOLD":      "trabajo de umbral",
+        "OVERSTRESSING":  "sobrecarga (excesivo)",
+        "NO_EFFECT":      "sin efecto significativo",
+    }
+
+    if train_effect or train_load:
+        lines.append("")
+        lines.append("=== CARGA Y EFECTO DE ENTRENAMIENTO ===")
+        te_labels = {1: "recuperacion", 2: "mantenimiento", 3: "mejora", 4: "alto impacto", 5: "sobreextension/pico"}
+        if train_effect is not None:
+            te = float(train_effect)
+            label = te_labels.get(min(int(te), 5), "")
+            lines.append(f"Training Effect aerobico: {te:.1f}/5.0 ({label})")
+        if anaer_effect is not None:
+            lines.append(f"Training Effect anaerobico: {float(anaer_effect):.1f}/5.0")
+        if effect_label:
+            friendly = _effect_labels_es.get(str(effect_label), str(effect_label).replace("_", " ").lower())
+            lines.append(f"Tipo de entrenamiento: {friendly}")
+        if train_load is not None:
+            lines.append(f"Carga de entrenamiento: {float(train_load):.1f}")
+            tl = float(train_load)
+            if tl > 300:
+                lines.append("  -> Carga MUY ALTA (>300): tipica de ultras o sesiones de maximo esfuerzo")
+            elif tl > 150:
+                lines.append("  -> Carga ALTA (150-300): sesion exigente, requiere varios dias de recuperacion")
+            else:
+                lines.append("  -> Carga moderada")
+
+    # ── Sección 4: Hidratación estimada ───────────────────────────────────
+    if dur_s:
+        lines.append("")
+        lines.append("=== HIDRATACION ESTIMADA ===")
+        dur_h = dur_s / 3600
+        low  = round(dur_h * 0.5, 1)
+        high = round(dur_h * 0.8, 1)
+        hot  = round(dur_h * 1.0, 1)
+        lines.append(f"Duracion {dur_h:.1f}h -> minimo {low}-{high}L (condiciones normales)")
+        lines.append(f"Con calor/altitud -> hasta {hot}L")
+        if dist_km and dist_km > 30:
+            lines.append("  -> Ultra: añadir electrolitos cada 45-60 min ademas de agua")
+
+    # ── Sección 5: Recuperacion pre-actividad ────────────────────────────
+    if body_battery_raw and body_battery_raw != "(sin datos)":
+        # El body_battery_raw viene como "BODY BATTERY del YYYY-MM-DD:\n[json]"
+        # Parsear el JSON y formatear los campos útiles
+        try:
+            bb_json_str = body_battery_raw.split("\n", 1)[1].strip() if "\n" in body_battery_raw else body_battery_raw
+            bb_data_list = json.loads(bb_json_str)
+            if isinstance(bb_data_list, list) and bb_data_list:
+                bb = bb_data_list[0]
+            elif isinstance(bb_data_list, dict):
+                bb = bb_data_list
+            else:
+                bb = {}
+            charged = bb.get("charged") or bb.get("bodyBatteryCharged")
+            drained  = bb.get("drained") or bb.get("bodyBatteryDrained")
+            highest  = bb.get("highestBodyBattery") or bb.get("highest")
+            lowest   = bb.get("lowestBodyBattery") or bb.get("lowest")
+            lines.append("")
+            lines.append("=== BODY BATTERY (dia de la actividad) ===")
+            if highest is not None and lowest is not None:
+                lines.append(f"Maximo del dia: {int(highest)} | Minimo del dia: {int(lowest)}")
+            if charged is not None:
+                lines.append(f"Recargado: +{int(charged)} puntos")
+            if drained is not None:
+                lines.append(f"Drenado: -{int(drained)} puntos")
+            if charged is not None and drained is not None:
+                net = int(charged) - int(drained)
+                lines.append(f"Balance neto: {net:+d} puntos {'(deficit esperado en una ultra)' if net < -30 else ''}")
+        except Exception:
+            lines.append("")
+            lines.append("=== BODY BATTERY (dia de la actividad) ===")
+            lines.append(body_battery_raw[:200])
+
+    if sleep_raw and sleep_raw != "(sin datos)":
+        # El sleep_raw viene como "SUENO noche previa (YYYY-MM-DD):\n{json}"
+        # Parsear dailySleepDTO y mostrar solo métricas útiles
+        try:
+            sleep_json_str = sleep_raw.split("\n", 1)[1].strip() if "\n" in sleep_raw else sleep_raw
+            sd = json.loads(sleep_json_str)
+            dto = sd.get("dailySleepDTO") or sd if isinstance(sd, dict) else {}
+            sleep_secs  = dto.get("sleepTimeSeconds", 0)
+            deep_secs   = dto.get("deepSleepSeconds", 0)
+            light_secs  = dto.get("lightSleepSeconds", 0)
+            rem_secs    = dto.get("remSleepSeconds", 0)
+            wake_secs   = dto.get("wakeSeconds", 0)
+            score       = dto.get("sleepScore")
+            quality_map = {1: "Pobre", 2: "Regular", 3: "Buena", 4: "Excelente"}
+            quality_num = dto.get("sleepQuality")
+            quality_str = quality_map.get(int(quality_num), str(quality_num)) if quality_num else None
+            def fmt_mins(s):
+                h, m = int(s) // 3600, (int(s) % 3600) // 60
+                return f"{h}h {m:02d}min" if h else f"{m}min"
+            lines.append("")
+            lines.append("=== SUENO NOCHE PREVIA ===")
+            lines.append(f"Duracion total: {fmt_mins(sleep_secs)}")
+            if deep_secs:
+                lines.append(f"Sueno profundo: {fmt_mins(deep_secs)}")
+            if light_secs:
+                lines.append(f"Sueno ligero: {fmt_mins(light_secs)}")
+            if rem_secs:
+                lines.append(f"REM: {fmt_mins(rem_secs)}")
+            if wake_secs:
+                lines.append(f"Despertares: {fmt_mins(wake_secs)}")
+            if score:
+                lines.append(f"Puntuacion Garmin: {score}/100")
+            if quality_str:
+                lines.append(f"Calidad: {quality_str}")
+        except Exception:
+            lines.append("")
+            lines.append("=== SUENO NOCHE PREVIA ===")
+            lines.append(sleep_raw[:300])
+
+    if hrv_raw and hrv_raw != "(sin datos)":
+        try:
+            hrv_json_str = hrv_raw.split("\n", 1)[1].strip() if "\n" in hrv_raw else hrv_raw
+            hd = json.loads(hrv_json_str)
+            if isinstance(hd, dict):
+                avg_hrv  = hd.get("last_night_avg_hrv_ms") or hd.get("avgHrv") or hd.get("averageHrv")
+                high_hrv = hd.get("last_night_5min_high_hrv_ms") or hd.get("highHrv")
+                lines.append("")
+                lines.append("=== HRV DIA ACTIVIDAD ===")
+                if avg_hrv:
+                    lines.append(f"HRV promedio noche: {avg_hrv} ms")
+                if high_hrv:
+                    lines.append(f"HRV maximo 5min: {high_hrv} ms")
+        except Exception:
+            lines.append("")
+            lines.append("=== HRV DIA ACTIVIDAD ===")
+            lines.append(hrv_raw[:200])
+
+    # ── Recuperacion recomendada post-ultra ──────────────────────────────
+    if train_load is not None or (dur_s and dur_s > 10800):
+        lines.append("")
+        lines.append("=== RECUPERACION RECOMENDADA ===")
+        tl_val = float(train_load) if train_load is not None else 0
+        dur_h2 = (dur_s or 0) / 3600
+        if tl_val > 300 or dur_h2 > 8:
+            lines.append("Carga extrema (ultra/maratón+): 10-14 días sin impacto, 3-4 semanas hasta intensidad")
+        elif tl_val > 150 or dur_h2 > 3:
+            lines.append("Carga alta: 3-5 días recuperacion activa, evitar intensidad 1 semana")
+        else:
+            lines.append("Carga media: 1-2 días recuperacion, retomar progresivamente")
+
+    return "\n".join(lines)
 
 
 async def _normalize_get_activity_args(
@@ -1152,6 +1670,9 @@ async def _normalize_get_activity_args(
             resolved_id = await _find_activity_id_by_date(mcp_session, target_date)
             if resolved_id is not None:
                 return {"activity_id": resolved_id}
+            # Si el usuario pidió una fecha concreta y no hay actividad ese día,
+            # no caer a matching por nombre para evitar seleccionar otro entrenamiento.
+            return {}
         # Si no es fecha, intentar resolver por nombre de actividad
         resolved_id = await _find_activity_id_by_name(mcp_session, candidate)
         if resolved_id is not None:
@@ -1175,6 +1696,89 @@ async def _normalize_get_activity_args(
             return {"activity_id": int(v)}
         return {}
     return {}
+
+
+async def _resolve_activity_id_from_query(mcp_session: ClientSession, user_message: str) -> int | None:
+    """Resuelve un activity_id directamente desde la consulta del usuario."""
+    if not isinstance(user_message, str) or not user_message.strip():
+        return None
+
+    target_date = _extract_iso_date_from_text(user_message)
+    if target_date:
+        by_date = await _find_activity_id_by_date(mcp_session, target_date)
+        if by_date is not None:
+            return by_date
+        return None
+
+    by_name = await _find_activity_id_by_name(mcp_session, user_message)
+    return by_name
+
+
+async def _build_activity_candidates_payload(mcp_session: ClientSession, user_message: str) -> str:
+    """Devuelve candidatos de actividades para ayudar al modelo a recuperar activity_id."""
+    target_date = _extract_iso_date_from_text(user_message) if isinstance(user_message, str) else None
+    collected: list[dict] = []
+    start = 0
+    limit = 100
+    max_pages = 20
+    try:
+        for _ in range(max_pages):
+            raw = await call_tool(mcp_session, "get_activities", {"start": str(start), "limit": str(limit)})
+            page_activities, has_more, next_start_val = _parse_activities_response(raw)
+            collected.extend(page_activities)
+            if not has_more:
+                break
+            start = next_start_val if next_start_val > start else start + limit
+    except Exception as exc:
+        payload = {
+            "error": "missing_activity_id",
+            "message": "No se pudo recuperar listado de actividades para resolver activity_id.",
+            "detail": str(exc),
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    activities = collected
+    if target_date:
+        date_matches = [a for a in activities if _extract_activity_date_iso(a) == target_date]
+        if not date_matches:
+            # No hay actividad en esa fecha exacta: informar claramente sin mostrar otras fechas
+            payload = {
+                "error": "no_activity_on_date",
+                "target_date": target_date,
+                "message": (
+                    f"No se encontró ninguna actividad registrada el {target_date} en Garmin Connect. "
+                    "Informa al usuario que no hay actividad para esa fecha y pregúntale si quiere "
+                    "ver las actividades más recientes disponibles."
+                ),
+            }
+            return json.dumps(payload, ensure_ascii=False)
+        activities = date_matches
+
+    compact_candidates = []
+    for activity in activities[:20]:
+        if not isinstance(activity, dict):
+            continue
+        activity_id = activity.get("activityId") or activity.get("activity_id") or activity.get("id")
+        try:
+            activity_id = int(activity_id)
+        except (TypeError, ValueError):
+            continue
+        compact_candidates.append(
+            {
+                "activity_id": activity_id,
+                "date": _extract_activity_date_iso(activity) or "",
+                "name": str(activity.get("name") or activity.get("activityName") or "Actividad").strip(),
+            }
+        )
+
+    payload = {
+        "error": "missing_activity_id",
+        "query": user_message,
+        "target_date": target_date,
+        "hint": "Selecciona una actividad de la lista y vuelve a llamar get_activity con activity_id.",
+        "candidates": compact_candidates,
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 class TrainerAgent:
@@ -1546,6 +2150,115 @@ class TrainerAgent:
         """
         messages = self._build_messages(user_message)
 
+        # Pre-fetch proactivo: si el usuario menciona una fecha explícita,
+        # resolver y cargar la actividad + contexto completo ANTES del bucle LLM.
+        user_date = _extract_iso_date_from_text(user_message)
+        if user_date:
+            pre_id = await _find_activity_id_by_date(self.mcp_session, user_date)
+            if pre_id is not None:
+                print(f"  [debug] Pre-fetch actividad {user_date} -> id={pre_id}")
+                raw_pre = await call_tool(self.mcp_session, "get_activity", {"activity_id": pre_id})
+                pre_data = _compact_tool_result(raw_pre, "get_activity")
+                context_parts = [f"ACTIVIDAD (activityId={pre_id}, fecha={user_date}):\n{pre_data}"]
+
+                # Body battery del día de la actividad (requiere start_date + end_date)
+                try:
+                    raw_bb = await call_tool(self.mcp_session, "get_body_battery", {
+                        "start_date": user_date,
+                        "end_date": user_date,
+                    })
+                    bb_data = _compact_tool_result(raw_bb, "get_body_battery")
+                    print(f"  [debug] body_battery({user_date}): {bb_data[:120] if bb_data else 'None'}")
+                    if bb_data and bb_data != "(sin datos)":
+                        context_parts.append(f"BODY BATTERY del {user_date}:\n{bb_data}")
+                except Exception as e:
+                    print(f"  [debug] body_battery error: {e}")
+
+                # Sueño de la noche previa (recuperación pre-actividad)
+                try:
+                    night_before = (date.fromisoformat(user_date) - timedelta(days=1)).isoformat()
+                    raw_sleep = await call_tool(self.mcp_session, "get_sleep_data", {"date": night_before})
+                    sleep_data = _compact_tool_result(raw_sleep, "get_sleep_data")
+                    print(f"  [debug] sleep({night_before}): {sleep_data[:120] if sleep_data else 'None'}")
+                    if sleep_data and sleep_data != "(sin datos)":
+                        context_parts.append(f"SUENO noche previa ({night_before}):\n{sleep_data}")
+                except Exception as e:
+                    print(f"  [debug] sleep error: {e}")
+
+                # HRV del día de la actividad
+                try:
+                    raw_hrv = await call_tool(self.mcp_session, "get_hrv_data", {"date": user_date})
+                    hrv_data = _compact_tool_result(raw_hrv, "get_hrv_data")
+                    print(f"  [debug] hrv({user_date}): {hrv_data[:80] if hrv_data else 'None'}")
+                    if hrv_data and hrv_data != "(sin datos)":
+                        context_parts.append(f"HRV del {user_date}:\n{hrv_data}")
+                except Exception as e:
+                    print(f"  [debug] hrv error: {e}")
+
+                # Carga de entrenamiento — prueba con rango de 4 semanas
+                try:
+                    tl_end   = date.today().isoformat()
+                    tl_start = (date.today() - timedelta(weeks=4)).isoformat()
+                    raw_tl = await call_tool(self.mcp_session, "get_training_load_trend", {
+                        "start_date": tl_start,
+                        "end_date": tl_end,
+                    })
+                    tl_data = _compact_tool_result(raw_tl, "get_training_load_trend")
+                    print(f"  [debug] training_load: {tl_data[:80] if tl_data else 'None'}")
+                    if tl_data and tl_data != "(sin datos)":
+                        context_parts.append(f"CARGA DE ENTRENAMIENTO:\n{tl_data}")
+                except Exception as e:
+                    print(f"  [debug] training_load error: {e}")
+
+                # Construir bloque de análisis pre-computado en Python
+                analysis_block = _build_activity_analysis_block(
+                    activity_raw=raw_pre,
+                    body_battery_raw=next((p for p in context_parts[1:] if "BODY BATTERY" in p), None),
+                    sleep_raw=next((p for p in context_parts if "SUENO" in p), None),
+                    hrv_raw=next((p for p in context_parts if "HRV" in p), None),
+                    training_load_raw=next((p for p in context_parts if "CARGA" in p), None),
+                )
+
+                # Eliminar del array de mensajes cualquier respuesta previa del asistente
+                # que sea un análisis de actividad — evita copiar floats crudos y formato viejo
+                _ANALYSIS_MARKERS = (
+                    "Resumen ejecutivo", "zonas de FC", "Distribución por zonas",
+                    "Plan de recuperación", "Efecto de entrenamiento",
+                    "Recomendaciones para la próxima", "Training load:",
+                    "Body battery:", "Hidratación recomendada",
+                    user_date, str(pre_id),
+                )
+                messages = [
+                    msg for msg in messages
+                    if not (
+                        msg.get("role") == "assistant"
+                        and any(m in (msg.get("content") or "") for m in _ANALYSIS_MARKERS)
+                    )
+                ]
+
+                messages.insert(len(messages) - 1, {
+                    "role": "system",
+                    "content": (
+                        f"ANALISIS PRE-COMPUTADO DE LA ACTIVIDAD DEL {user_date}:\n\n"
+                        f"{analysis_block}\n\n"
+                        "INSTRUCCION OBLIGATORIA: Usa SOLO los datos de los bloques === de arriba.\n"
+                        "Estructura la respuesta en Markdown con estas secciones (una por linea):\n\n"
+                        "## \U0001f4ca Resumen ejecutivo\n"
+                        "## \U0001f493 Distribucion por zonas de FC\n"
+                        "## \u26a1 Efecto de entrenamiento y carga\n"
+                        "## \U0001f4a7 Hidratacion recomendada\n"
+                        "## \U0001f6cc Estado pre-carrera (body battery y sueno si disponibles)\n"
+                        "## \U0001f504 Plan de recuperacion post-actividad\n"
+                        "## \U0001f3af Recomendaciones para la proxima edicion\n\n"
+                        "FORMATO: Cada item de lista en su propia linea con '- ' o '* '. "
+                        "NUNCA pongas varios items en la misma linea. "
+                        "PROHIBIDO: velocidad en m/s, duracion en segundos, floats crudos (ej: 313.53961181640625). "
+                        "USA los valores ya calculados del bloque (ritmo min/km, HH:MM:SS, %.1f)."
+                    ),
+                })
+            else:
+                print(f"  [debug] Pre-fetch {user_date}: no se encontro actividad")
+
         _MAX_TOOL_ITER = 15
         iteration = 0
         while True:
@@ -1612,7 +2325,7 @@ class TrainerAgent:
             # Debug: muestra si el modelo llama herramientas
             if message.tool_calls:
                 tool_names = [tc.function.name for tc in message.tool_calls]
-                print(f"  [debug] Iteración {iteration}: llamando tools → {tool_names}")
+                print(f"  [debug] Iteracion {iteration}: llamando tools -> {tool_names}")
             else:
                 print(f"  [debug] Iteración {iteration}: respuesta directa (sin tool calls)")
                 print(f"  [debug] finish_reason: {response.choices[0].finish_reason}")
@@ -1634,16 +2347,37 @@ class TrainerAgent:
                     # Normalizar fechas: convertir palabras como 'hoy'/'ayer' a ISO
                     arguments = _normalize_date_args(arguments)
                     if tool_name == "get_activity":
-                        arguments = await _normalize_get_activity_args(
-                            self.mcp_session,
-                            arguments,
-                            user_message=user_message,
-                        )
+                        # Si la pregunta contiene una fecha explícita, SIEMPRE resolver por fecha,
+                        # ignorando el activity_id que haya propuesto el modelo (puede ser de
+                        # conversaciones anteriores o alucinado).
+                        user_date = _extract_iso_date_from_text(user_message)
+                        if user_date:
+                            resolved_id = await _find_activity_id_by_date(self.mcp_session, user_date)
+                            if resolved_id is not None:
+                                print(f"  [debug] Fecha explicita {user_date} -> resolviendo a activity_id={resolved_id} (modelo propuso {arguments.get('activity_id', 'nada')})")
+                                arguments = {"activity_id": resolved_id}
+                            else:
+                                print(f"  [debug] Fecha explicita {user_date} -> no se encontro actividad ese dia")
+                                arguments = {}
+                        else:
+                            arguments = await _normalize_get_activity_args(
+                                self.mcp_session,
+                                arguments,
+                                user_message=user_message,
+                            )
+                            if not (isinstance(arguments, dict) and arguments.get("activity_id")):
+                                resolved_id = await _resolve_activity_id_from_query(self.mcp_session, user_message)
+                                if resolved_id is not None:
+                                    arguments = {"activity_id": resolved_id}
+                    arguments = _normalize_trend_date_range(tool_name, arguments)
 
                     print(f"  [debug] Ejecutando: {tool_name}({arguments})")
-                    raw_result = await call_tool(
-                        self.mcp_session, tool_name, arguments
-                    )
+                    if tool_name == "get_activity" and not (isinstance(arguments, dict) and arguments.get("activity_id")):
+                        raw_result = await _build_activity_candidates_payload(self.mcp_session, user_message)
+                    else:
+                        raw_result = await call_tool(
+                            self.mcp_session, tool_name, arguments
+                        )
 
                     # Si no hay training_readiness, enriquecer contexto con métricas de recuperación
                     if (
@@ -1660,7 +2394,7 @@ class TrainerAgent:
                             raw_result = fallback_snapshot
 
                     tool_result = _compact_tool_result(raw_result, tool_name)
-                    print(f"  [debug] Resultado ({len(raw_result or '')} → {len(tool_result)} chars): {tool_result[:150]}")
+                    print(f"  [debug] Resultado ({len(raw_result or '')} -> {len(tool_result)} chars): {tool_result[:150]}")
 
                     messages.append({
                         "role": "tool",
@@ -1673,6 +2407,15 @@ class TrainerAgent:
 
             # Respuesta final del agente
             assistant_reply = message.content or ""
+
+            # Fallback anti-respuesta genérica: si ya existe objetivo en perfil,
+            # devolver una planificación base en lugar de pedir contexto redundante.
+            if (
+                _is_generic_needs_more_info_reply(assistant_reply)
+                and _is_planning_intent(user_message)
+                and _has_goal_in_profile(self.user_profile)
+            ):
+                assistant_reply = _build_goal_plan_fallback(self.user_profile)
 
             # Guardar en historial de conversación
             self.conversation_history.append({"role": "user", "content": user_message})

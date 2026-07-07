@@ -69,3 +69,8 @@
 ## Notas de mantenimiento
 - Mantener TODO sincronizado con decisiones de arquitectura reales.
 - Evitar registrar aqui tareas ya completadas salvo resumen corto de hitos.
+
+
+
+
+Cuando arranca la aplicación comprobar el usuario, si ya existe no debería pedir contraseña ya que la deberiamos tener almacenada y truncada. Esa contraseña se debería de comprobar que se accede con ella a Garmin en vez de volver a pedirla, de esta manera la UX para el usuario es mejor

@@ -19,6 +19,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.trainer_agent import (
+    _build_activity_candidates_payload,
+    _build_goal_plan_fallback,
     _build_athlete_knowledge_context,
     _build_proactive_status_markdown,
     _build_recovery_fallback_snapshot,
@@ -28,8 +30,13 @@ from agent.trainer_agent import (
     _extract_activities_list,
     _extract_iso_date_from_text,
     _GeminiCompletions,
+    _has_goal_in_profile,
+    _is_generic_needs_more_info_reply,
+    _is_planning_intent,
+    _resolve_activity_id_from_query,
     _is_activity_in_last_48h,
     _is_no_data_result,
+    _normalize_trend_date_range,
     _normalize_get_activity_args,
     _normalize_date_args,
     _load_athlete_knowledge_chunks,
@@ -598,6 +605,104 @@ class TestNormalizeGetActivityArgs:
             )
         assert out == {"activity_id": 2002}
 
+    @pytest.mark.asyncio
+    async def test_date_query_does_not_fallback_to_name_when_date_missing(self):
+        fake_response = json.dumps(
+            {
+                "start": 0,
+                "limit": 100,
+                "count": 2,
+                "has_more": False,
+                "next_start": 100,
+                "activities": [
+                    {
+                        "activityId": 4001,
+                        "name": "Competición local 10K",
+                        "startTimeLocal": "2026-07-04T08:00:00.0",
+                    },
+                    {
+                        "activityId": 4002,
+                        "name": "Senderismo",
+                        "startTimeLocal": "2026-07-04T10:00:00.0",
+                    },
+                ],
+            }
+        )
+        with patch("agent.trainer_agent.call_tool", return_value=fake_response):
+            out = await _normalize_get_activity_args(
+                MagicMock(),
+                {},
+                user_message="Analiza mi competición del 2 de julio de 2026",
+            )
+        assert out == {}
+
+
+class TestResolveActivityIdFromQuery:
+    @pytest.mark.asyncio
+    async def test_resolves_from_query_date(self):
+        fake_response = json.dumps(
+            {
+                "start": 0,
+                "limit": 100,
+                "count": 2,
+                "has_more": False,
+                "next_start": 100,
+                "activities": [
+                    {"activityId": 111, "startTimeLocal": "2026-07-01T07:00:00.0"},
+                    {"activityId": 222, "startTimeLocal": "2026-07-02T07:30:00.0"},
+                ],
+            }
+        )
+        with patch("agent.trainer_agent.call_tool", return_value=fake_response):
+            out = await _resolve_activity_id_from_query(
+                MagicMock(),
+                "Analiza mi competición del 2 de julio de 2026",
+            )
+        assert out == 222
+
+    @pytest.mark.asyncio
+    async def test_build_candidates_payload_returns_candidates(self):
+        fake_response = json.dumps(
+            {
+                "activities": [
+                    {
+                        "activityId": 333,
+                        "name": "Zara Speed Run 10k",
+                        "startTimeLocal": "2026-07-02T08:00:00.0",
+                    }
+                ]
+            }
+        )
+        with patch("agent.trainer_agent.call_tool", return_value=fake_response):
+            raw = await _build_activity_candidates_payload(
+                MagicMock(),
+                "Analiza mi competición del 2 de julio de 2026",
+            )
+
+        parsed = json.loads(raw)
+        assert parsed["error"] == "missing_activity_id"
+        assert parsed["candidates"]
+
+    @pytest.mark.asyncio
+    async def test_date_query_strict_no_name_fallback(self):
+        fake_response = json.dumps(
+            {
+                "activities": [
+                    {
+                        "activityId": 5001,
+                        "name": "Competición 10K",
+                        "startTimeLocal": "2026-07-04T08:00:00.0",
+                    }
+                ]
+            }
+        )
+        with patch("agent.trainer_agent.call_tool", return_value=fake_response):
+            out = await _resolve_activity_id_from_query(
+                MagicMock(),
+                "Analiza mi competición del 2 de julio de 2026",
+            )
+        assert out is None
+
 
 # ─── Fallback de recuperación ───────────────────────────────────────────────
 
@@ -687,3 +792,51 @@ class TestStartupProactive:
         assert snapshot["window_hours"] == 48
         assert snapshot["body_battery"]["summary"].startswith("hoy=")
         assert snapshot["trainings"]
+
+
+# ─── Fallback de planificacion y rangos trend ─────────────────────────────
+
+class TestPlanningFallbackAndRanges:
+    def test_normalize_trend_date_range_clamps_future_end_date(self):
+        out = _normalize_trend_date_range(
+            "get_training_load_trend",
+            {"start_date": "2026-07-07", "end_date": "2099-01-01"},
+        )
+        assert "start_date" in out and "end_date" in out
+        assert out["end_date"] <= date.today().isoformat()
+
+    def test_normalize_trend_date_range_enforces_max_window(self):
+        out = _normalize_trend_date_range(
+            "get_hrv_trend",
+            {"start_date": "2020-01-01", "end_date": date.today().isoformat()},
+        )
+        s = date.fromisoformat(out["start_date"])
+        e = date.fromisoformat(out["end_date"])
+        assert (e - s).days <= 30
+
+    def test_generic_needs_more_info_detection(self):
+        txt = "Lo siento, pero no puedo crear una planificación para tu objetivo sin más información"
+        assert _is_generic_needs_more_info_reply(txt)
+
+    def test_planning_intent_detection_true(self):
+        assert _is_planning_intent("¿puedes crearme una planificación para mi objetivo?")
+
+    def test_planning_intent_detection_false_for_activity_analysis(self):
+        assert not _is_planning_intent("Analiza mi entrenamiento del día 2 de julio de 2026")
+
+    def test_has_goal_in_profile(self):
+        profile = {"goals": {"target_race": "10k", "target_race_date": "2026-11-22"}}
+        assert _has_goal_in_profile(profile)
+
+    def test_build_goal_plan_fallback_contains_target(self):
+        profile = {
+            "goals": {
+                "target_race": "Zara Speed Run 10k",
+                "target_race_date": "2026-11-22",
+                "target_time": "0:35:59",
+            },
+            "health": {"injuries": ["DT 1"]},
+        }
+        out = _build_goal_plan_fallback(profile)
+        assert "Zara Speed Run 10k" in out
+        assert "Estructura semanal propuesta" in out

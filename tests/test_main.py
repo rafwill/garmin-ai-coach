@@ -17,6 +17,7 @@ import pytest
 from agent.main import (
     _auto_select_provider,
     _build_enriched_athlete_knowledge,
+    _ensure_garmin_credentials,
     _format_coach_markdown,
     _is_first_time,
     _validate_date,
@@ -244,6 +245,34 @@ class TestBuildEnrichedAthleteKnowledge:
         assert "Estado de las ultimas 48h" in out
         assert "Rodaje suave" in out
         assert "```json" in out
+
+
+# ─── _ensure_garmin_credentials ────────────────────────────────────────────
+
+class TestEnsureGarminCredentials:
+    def test_reuses_app_password_when_strategy_same(self):
+        creds = {
+            "garmin_email": "runner@example.com",
+            "garmin_password_strategy": "same_as_app_password",
+        }
+        with patch("agent.main.update_user_credentials") as upd_mock, \
+             patch("agent.main.Prompt.ask") as prompt_mock, \
+             patch.dict("os.environ", {}, clear=True):
+            out = _ensure_garmin_credentials(creds, app_password="app-secret")
+
+        assert out["garmin_password"] == "app-secret"
+        assert prompt_mock.call_count == 0
+        upd_mock.assert_called_once()
+
+    def test_prompts_password_when_no_strategy_and_no_env(self):
+        creds = {"garmin_email": "runner@example.com"}
+        with patch("agent.main.update_user_credentials"), \
+             patch("agent.main.Prompt.ask", return_value="typed-secret") as prompt_mock, \
+             patch.dict("os.environ", {}, clear=True):
+            out = _ensure_garmin_credentials(creds, app_password="")
+
+        assert out["garmin_password"] == "typed-secret"
+        prompt_mock.assert_called_once()
 
 
 # ─── _auto_select_provider ──────────────────────────────────────────────────

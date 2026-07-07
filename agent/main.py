@@ -228,11 +228,11 @@ def _build_enriched_athlete_knowledge(profile: dict, enrichment: dict) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def _authenticate_or_register_user() -> tuple[str, dict, bool]:
+def _authenticate_or_register_user() -> tuple[str, dict, bool, str]:
     """Flujo inicial de acceso: iniciar sesión o registrarse.
 
     Returns:
-        (username, credentials, is_new_user)
+        (username, credentials, is_new_user, app_password)
     """
     console.print(Panel.fit(
         "[bold]Acceso a GarminCoach[/]\n"
@@ -259,7 +259,7 @@ def _authenticate_or_register_user() -> tuple[str, dict, bool]:
                 continue
             set_active_user(result.get("user_id"), username)
             console.print(f"[green]✓[/] Sesión iniciada como [bold]{username}[/].")
-            return username, result.get("credentials") or {}, False
+            return username, result.get("credentials") or {}, False, password
 
         confirm = Prompt.ask("Repite la password", password=True).strip()
         if confirm != password:
@@ -275,13 +275,16 @@ def _authenticate_or_register_user() -> tuple[str, dict, bool]:
             default_email = username if "@" in username else ""
             garmin_email = Prompt.ask("Email Garmin", default=default_email).strip()
             garmin_password = password
+            garmin_password_strategy = "same_as_app_password"
         else:
             garmin_email = Prompt.ask("Email Garmin").strip()
             garmin_password = Prompt.ask("Password Garmin", password=True).strip()
+            garmin_password_strategy = "manual"
 
         credentials = {
             "garmin_email": garmin_email,
             "garmin_password": garmin_password,
+            "garmin_password_strategy": garmin_password_strategy,
         }
         create = register_app_user(username, password, credentials=credentials)
         if not create.get("ok"):
@@ -290,17 +293,26 @@ def _authenticate_or_register_user() -> tuple[str, dict, bool]:
 
         set_active_user(create.get("user_id"), username)
         console.print(f"[green]✓[/] Usuario [bold]{username}[/] creado.")
-        return username, credentials, True
+        return username, credentials, True, password
 
 
-def _ensure_garmin_credentials(credentials: dict) -> dict:
+def _ensure_garmin_credentials(credentials: dict, app_password: str = "") -> dict:
     """Asegura credenciales Garmin para el usuario activo y las deja en entorno."""
     credentials = dict(credentials or {})
     garmin_email = (credentials.get("garmin_email") or "").strip()
     garmin_password = (credentials.get("garmin_password") or "").strip()
+    strategy = (credentials.get("garmin_password_strategy") or "").strip()
 
     if not garmin_email:
         garmin_email = Prompt.ask("Email Garmin Connect", default=os.environ.get("GARMIN_EMAIL", "")).strip()
+
+    if not garmin_password and strategy == "same_as_app_password" and app_password:
+        garmin_password = app_password
+
+    if not garmin_password:
+        # Último fallback: si hay GARMIN_PASSWORD en entorno (p. ej. .env), reutilizarla.
+        garmin_password = (os.environ.get("GARMIN_PASSWORD") or "").strip()
+
     if not garmin_password:
         garmin_password = Prompt.ask("Password Garmin Connect", password=True).strip()
 
@@ -730,8 +742,8 @@ async def main() -> None:
     # Fail-fast de infraestructura: evita pedir credenciales si la DB no está lista.
     _check_and_migrate_supabase()
 
-    username, credentials, is_new_user = _authenticate_or_register_user()
-    _ensure_garmin_credentials(credentials)
+    username, credentials, is_new_user, app_password = _authenticate_or_register_user()
+    _ensure_garmin_credentials(credentials, app_password=app_password)
     _check_garmin_env()
 
     provider = _auto_select_provider()
