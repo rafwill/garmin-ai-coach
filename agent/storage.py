@@ -345,6 +345,232 @@ def save_athlete_knowledge(content: str) -> None:
     sb.table("athlete_knowledge").upsert({"app_user_id": uid, "content": (content or "").strip()}).execute()
 
 
+def _normalize_plan_status(status: str | None, default: str = "draft") -> str:
+    raw = str(status or "").strip().lower()
+    if raw in {"draft", "active", "inactive", "archived"}:
+        return raw
+    return default
+
+
+def _to_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _build_training_plan_row(app_user_id: str, plan: dict) -> dict:
+    status = _normalize_plan_status((plan or {}).get("status"), default="draft")
+    if bool((plan or {}).get("active")):
+        status = "active"
+    return {
+        "id": (plan or {}).get("id") or uuid4().hex,
+        "app_user_id": app_user_id,
+        "title": str((plan or {}).get("title") or (plan or {}).get("name") or "Plan").strip(),
+        "description": str((plan or {}).get("description") or "").strip(),
+        "objective": str((plan or {}).get("objective") or "").strip(),
+        "difficulty": str((plan or {}).get("difficulty") or "moderate").strip().lower(),
+        "duration_weeks": max(0, _to_int((plan or {}).get("duration_weeks"), 0)),
+        "status": status,
+        "source": str((plan or {}).get("source") or "agent").strip(),
+        "plan_data": dict((plan or {}).get("plan_data") or {}),
+    }
+
+
+def _build_training_plan_session_rows(plan_id: str, sessions: list[dict] | None) -> list[dict]:
+    rows: list[dict] = []
+    for item in list(sessions or []):
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "id": item.get("id") or uuid4().hex,
+                "plan_id": plan_id,
+                "week_index": max(1, _to_int(item.get("week_index"), 1)),
+                "day_index": max(1, _to_int(item.get("day_index"), 1)),
+                "session_type": str(item.get("session_type") or item.get("type") or "running").strip().lower(),
+                "duration_min": _to_int(item.get("duration_min"), 0) if item.get("duration_min") is not None else None,
+                "intensity": str(item.get("intensity") or "").strip() or None,
+                "exercises": list(item.get("exercises") or []),
+                "notes": str(item.get("notes") or "").strip(),
+            }
+        )
+    return rows
+
+
+def list_training_plans(include_archived: bool = False) -> list[dict]:
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    query = sb.table("training_plan").select("*").eq("app_user_id", uid)
+    if not include_archived:
+        query = query.neq("status", "archived")
+    res = query.order("created_at", desc=True).execute()
+    return list(res.data or [])
+
+
+def get_training_plan(plan_id: str) -> dict | None:
+    uid = _require_active_user_id()
+    if not plan_id:
+        return None
+    sb = _require_supabase()
+    res = (
+        sb.table("training_plan")
+        .select("*")
+        .eq("id", plan_id)
+        .eq("app_user_id", uid)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def get_active_training_plan() -> dict | None:
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    res = (
+        sb.table("training_plan")
+        .select("*")
+        .eq("app_user_id", uid)
+        .eq("status", "active")
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def list_training_plan_sessions(plan_id: str) -> list[dict]:
+    if not plan_id:
+        return []
+    sb = _require_supabase()
+    res = (
+        sb.table("training_plan_session")
+        .select("*")
+        .eq("plan_id", plan_id)
+        .order("week_index")
+        .order("day_index")
+        .execute()
+    )
+    return list(res.data or [])
+
+
+def _next_training_plan_version_number(plan_id: str) -> int:
+    sb = _require_supabase()
+    res = (
+        sb.table("training_plan_version")
+        .select("version_number")
+        .eq("plan_id", plan_id)
+        .order("version_number", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        return 1
+    return _to_int(res.data[0].get("version_number"), 0) + 1
+
+
+def save_training_plan_version(plan_id: str, snapshot: dict, change_reason: str = "updated") -> dict:
+    if not plan_id:
+        raise ValueError("plan_id es obligatorio")
+    sb = _require_supabase()
+    version_number = _next_training_plan_version_number(plan_id)
+    row = {
+        "id": uuid4().hex,
+        "plan_id": plan_id,
+        "version_number": version_number,
+        "snapshot": dict(snapshot or {}),
+        "change_reason": str(change_reason or "updated").strip(),
+    }
+    sb.table("training_plan_version").insert(row).execute()
+    return row
+
+
+def create_training_plan(plan: dict, sessions: list[dict] | None = None, change_reason: str = "created") -> dict:
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+
+    plan_row = _build_training_plan_row(uid, plan or {})
+    if plan_row["status"] == "active":
+        sb.table("training_plan").update({"status": "inactive"}).eq("app_user_id", uid).eq("status", "active").execute()
+
+    sb.table("training_plan").insert(plan_row).execute()
+
+    session_rows = _build_training_plan_session_rows(plan_row["id"], sessions)
+    if session_rows:
+        sb.table("training_plan_session").insert(session_rows).execute()
+
+    snapshot = {
+        "plan": plan_row,
+        "sessions": session_rows,
+    }
+    save_training_plan_version(plan_row["id"], snapshot, change_reason=change_reason)
+    return plan_row
+
+
+def update_training_plan(
+    plan_id: str,
+    patch: dict,
+    sessions: list[dict] | None = None,
+    change_reason: str = "updated",
+) -> dict:
+    uid = _require_active_user_id()
+    sb = _require_supabase()
+    current = get_training_plan(plan_id)
+    if not current:
+        raise ValueError("Plan no encontrado")
+
+    patch = dict(patch or {})
+    if "status" in patch:
+        patch["status"] = _normalize_plan_status(patch.get("status"), default=current.get("status") or "draft")
+    if patch.get("active") is True:
+        patch["status"] = "active"
+    patch.pop("active", None)
+    patch.pop("id", None)
+    patch.pop("app_user_id", None)
+
+    if patch.get("status") == "active":
+        sb.table("training_plan").update({"status": "inactive"}).eq("app_user_id", uid).eq("status", "active").neq("id", plan_id).execute()
+
+    if patch:
+        sb.table("training_plan").update(patch).eq("id", plan_id).eq("app_user_id", uid).execute()
+
+    if sessions is not None:
+        sb.table("training_plan_session").delete().eq("plan_id", plan_id).execute()
+        session_rows = _build_training_plan_session_rows(plan_id, sessions)
+        if session_rows:
+            sb.table("training_plan_session").insert(session_rows).execute()
+
+    plan_row = get_training_plan(plan_id) or current
+    session_rows = list_training_plan_sessions(plan_id)
+    snapshot = {
+        "plan": plan_row,
+        "sessions": session_rows,
+    }
+    save_training_plan_version(plan_id, snapshot, change_reason=change_reason)
+    return plan_row
+
+
+def activate_training_plan(plan_id: str, change_reason: str = "activated") -> dict:
+    uid = _require_active_user_id()
+    if not get_training_plan(plan_id):
+        raise ValueError("Plan no encontrado")
+
+    sb = _require_supabase()
+    sb.table("training_plan").update({"status": "inactive"}).eq("app_user_id", uid).eq("status", "active").neq("id", plan_id).execute()
+    sb.table("training_plan").update({"status": "active"}).eq("id", plan_id).eq("app_user_id", uid).execute()
+
+    plan_row = get_training_plan(plan_id)
+    session_rows = list_training_plan_sessions(plan_id)
+    save_training_plan_version(
+        plan_id,
+        {
+            "plan": plan_row or {},
+            "sessions": session_rows,
+        },
+        change_reason=change_reason,
+    )
+    return plan_row or {}
+
+
 def _key_hash(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 

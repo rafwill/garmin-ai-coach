@@ -66,8 +66,14 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
 
 * **🧭 Estado de plan coherente (sin alucinaciones):**
   - Preguntas tipo "¿tengo plan?", "¿cuál es ese plan?" o "¿sigo con el plan?" se responden por ruta determinista.
-  - La respuesta se basa en `training_plan` real (no en inferencias del LLM).
+  - La respuesta se basa en `training_plan` real en base de datos (no en inferencias del LLM).
   - `goals` se muestra como objetivo guardado, pero no se interpreta como plan activo.
+
+* **🗂️ Planes de entrenamiento versionados (DB-first):**
+  - Los planes se guardan en tablas dedicadas de Supabase (`training_plan`, `training_plan_session`, `training_plan_version`).
+  - Cada edición del plan genera una nueva versión (snapshot) para trazabilidad.
+  - Existe una única fuente de verdad de plan activo por usuario (máximo uno activo a la vez).
+  - Compatibilidad backward: el perfil mantiene `training_plan` como espejo temporal para rutas legacy.
 
 * **🥇 Récords personales de running (mejorado):**
   - Consulta directa de PRs desde Garmin con `get_personal_record`.
@@ -205,6 +211,11 @@ El modo actual del agente es **DB-first multiusuario**: requiere Supabase para a
 Script disponible para Supabase:
 - [`supabase/schema.sql`](supabase/schema.sql): crea el esquema multiusuario para una instalacion limpia.
 
+Incluye además el modelo de planificación versionada:
+- `training_plan`: cabecera del plan (título, objetivo, estado, metadatos).
+- `training_plan_session`: sesiones por semana/día (tipo, duración, intensidad, ejercicios).
+- `training_plan_version`: historial de snapshots por edición/activación.
+
 ### 5. Inicio de sesión multiusuario
 Al arrancar `python -m agent.main`:
 - Se pide el **nombre de usuario**.
@@ -312,7 +323,8 @@ garmin-ai-coach/
 ├── tests/
 │   ├── __init__.py
 │   ├── test_trainer_agent.py  # Tests de funciones puras + mock de Gemini.
-│   └── test_main.py           # Tests de validaciones de input + flujo principal.
+│   ├── test_main.py           # Tests de validaciones de input + flujo principal.
+│   └── test_storage.py        # Tests de persistencia DB-first y seguridad de credenciales.
 ├── .env                   # Credenciales locales (no subir a git).
 ├── .env.example           # Plantilla de configuración con comentarios.
 ├── agent.log              # Log de ejecución del agente (local, no versionar).

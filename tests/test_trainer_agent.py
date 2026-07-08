@@ -997,6 +997,29 @@ class TestPlanningFallbackAndRanges:
         assert plan is not None
         assert plan["title"] == "Plan 10K"
 
+    def test_get_active_training_plan_prefers_storage_source_of_truth(self):
+        profile = {"training_plan": {"active": True, "title": "Plan local", "status": "active"}}
+        with patch("agent.trainer_agent._storage.get_active_training_plan", return_value={
+            "id": "plan-db-1",
+            "title": "Plan DB",
+            "status": "active",
+            "source": "agent",
+            "plan_data": {"target_race": "10K"},
+        }), patch("agent.trainer_agent._storage.list_training_plan_sessions", return_value=[]):
+            plan = _get_active_training_plan(profile)
+
+        assert plan is not None
+        assert plan["title"] == "Plan DB"
+        assert plan["id"] == "plan-db-1"
+
+    def test_get_active_training_plan_falls_back_to_profile_when_storage_unavailable(self):
+        profile = {"training_plan": {"active": True, "title": "Plan local", "status": "active"}}
+        with patch("agent.trainer_agent._storage.get_active_training_plan", side_effect=RuntimeError("db down")):
+            plan = _get_active_training_plan(profile)
+
+        assert plan is not None
+        assert plan["title"] == "Plan local"
+
     def test_build_startup_plan_recommendation_includes_title(self):
         msg = _build_startup_plan_recommendation({"title": "Plan 10K", "active": True})
         assert "Plan 10K" in msg
@@ -1072,6 +1095,58 @@ class TestPlanStatusChatRoute:
 
         assert "No tienes plan asignado" in out
         assert len(agent.conversation_history) == 2
+
+    @pytest.mark.asyncio
+    async def test_chat_fallback_planning_persists_plan_in_storage(self):
+        from agent.trainer_agent import TrainerAgent
+
+        msg_final = MagicMock()
+        msg_final.tool_calls = None
+        msg_final.content = "Lo siento, pero no puedo crear una planificación para tu objetivo sin más información"
+
+        choice = MagicMock()
+        choice.message = msg_final
+        choice.finish_reason = "stop"
+
+        response = MagicMock()
+        response.choices = [choice]
+        response.usage = None
+
+        agent = object.__new__(TrainerAgent)
+        agent.user_profile = {
+            "goals": {
+                "target_race": "10K",
+                "target_race_date": "2026-11-22",
+                "target_time": "00:45:00",
+            },
+            "health": {},
+        }
+        agent.conversation_history = []
+        agent.tools_schema = []
+        agent.mcp_session = MagicMock()
+        agent.mcp_read_only = True
+        agent.model = "test-model"
+        agent._build_messages = lambda _msg: []
+        agent.client = MagicMock()
+        agent.client.chat = MagicMock()
+        agent.client.chat.completions = MagicMock()
+        agent.client.chat.completions.create = AsyncMock(return_value=response)
+
+        with patch("agent.trainer_agent._storage.create_training_plan", return_value={
+            "id": "plan-db-1",
+            "title": "Plan hacia 10K",
+            "status": "active",
+            "source": "agent_goal_fallback",
+            "plan_data": {
+                "target_race": "10K",
+                "target_race_date": "2026-11-22",
+            },
+        }) as mocked_create, patch("agent.trainer_agent._save_user_profile"), patch("agent.trainer_agent._save_history_entry"):
+            out = await TrainerAgent.chat(agent, "Puedes planificarme la semana para mi 10K?")
+
+        assert "Planificación Inicial para tu Objetivo" in out
+        mocked_create.assert_called_once()
+        assert agent.user_profile["training_plan"]["id"] == "plan-db-1"
 
 
 class TestMcpReadOnlyPolicy:

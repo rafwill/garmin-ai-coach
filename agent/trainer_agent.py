@@ -1188,8 +1188,49 @@ def _has_goal_in_profile(profile: dict) -> bool:
     )
 
 
+def _normalize_storage_plan_row(row: dict) -> dict | None:
+    """Normaliza una fila de training_plan (DB) al formato usado por el agente."""
+    if not isinstance(row, dict):
+        return None
+
+    plan_data = row.get("plan_data")
+    merged: dict = dict(plan_data) if isinstance(plan_data, dict) else {}
+    status = str(row.get("status") or merged.get("status") or "").strip().lower()
+
+    merged.update(
+        {
+            "id": row.get("id") or merged.get("id"),
+            "title": row.get("title") or merged.get("title") or merged.get("name") or "Plan activo",
+            "description": row.get("description") or merged.get("description") or "",
+            "objective": row.get("objective") or merged.get("objective") or "",
+            "difficulty": row.get("difficulty") or merged.get("difficulty") or "moderate",
+            "duration_weeks": row.get("duration_weeks") if row.get("duration_weeks") is not None else merged.get("duration_weeks"),
+            "status": status or "active",
+            "source": row.get("source") or merged.get("source") or "agent",
+            "active": (status == "active"),
+        }
+    )
+    return merged
+
+
 def _get_active_training_plan(profile: dict) -> dict | None:
-    """Devuelve el plan activo del atleta, separado de goals/objetivo."""
+    """Devuelve el plan activo del atleta; prioriza DB y usa perfil como fallback."""
+    try:
+        db_row = _storage.get_active_training_plan()
+        db_plan = _normalize_storage_plan_row(db_row)
+        if db_plan:
+            plan_id = db_plan.get("id")
+            if plan_id:
+                try:
+                    sessions = _storage.list_training_plan_sessions(str(plan_id))
+                    if sessions:
+                        db_plan["sessions"] = sessions
+                except Exception:
+                    pass
+            return db_plan
+    except Exception:
+        pass
+
     plan = (profile or {}).get("training_plan")
     if not isinstance(plan, dict):
         return None
@@ -3072,20 +3113,45 @@ class TrainerAgent:
                 and _has_goal_in_profile(self.user_profile)
             ):
                 assistant_reply = _build_goal_plan_fallback(self.user_profile)
-                # Persistir un plan activo mínimo para diferenciarlo del objetivo.
+                # Persistir un plan activo mínimo como fuente de verdad en DB
+                # y mantener compatibilidad hacia atrás en perfil.
                 try:
                     goals = (self.user_profile or {}).get("goals", {})
                     target_race = goals.get("target_race") or "objetivo"
                     target_date = goals.get("target_race_date") or "fecha por definir"
-                    self.user_profile["training_plan"] = {
-                        "active": True,
-                        "status": "active",
-                        "source": "agent_goal_fallback",
-                        "title": f"Plan hacia {target_race}",
-                        "target_race": target_race,
-                        "target_race_date": target_date,
-                        "created_at": date.today().isoformat(),
-                    }
+                    created = _storage.create_training_plan(
+                        {
+                            "title": f"Plan hacia {target_race}",
+                            "description": "Plan inicial autogenerado por fallback desde objetivo del atleta.",
+                            "objective": str(target_race),
+                            "difficulty": "moderate",
+                            "duration_weeks": 0,
+                            "status": "active",
+                            "source": "agent_goal_fallback",
+                            "plan_data": {
+                                "target_race": target_race,
+                                "target_race_date": target_date,
+                                "created_at": date.today().isoformat(),
+                            },
+                        },
+                        sessions=None,
+                        change_reason="auto_fallback_from_goal",
+                    )
+                    db_plan = _normalize_storage_plan_row(created)
+                    if db_plan:
+                        db_plan.setdefault("target_race", target_race)
+                        db_plan.setdefault("target_race_date", target_date)
+                        self.user_profile["training_plan"] = db_plan
+                    else:
+                        self.user_profile["training_plan"] = {
+                            "active": True,
+                            "status": "active",
+                            "source": "agent_goal_fallback",
+                            "title": f"Plan hacia {target_race}",
+                            "target_race": target_race,
+                            "target_race_date": target_date,
+                            "created_at": date.today().isoformat(),
+                        }
                     _save_user_profile(self.user_profile)
                 except Exception:
                     pass
