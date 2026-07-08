@@ -3,11 +3,13 @@
 ## Estado actual
 - Arquitectura activa: DB-first multiusuario con Supabase obligatorio.
 - RAG ligero operativo con base de conocimiento del atleta.
-- Suite de tests actual: más de 100 tests.
+- Suite de tests actual: mas de 100 tests.
 
 ---
 
-## Completado recientemente
+## ✅ Completado
+
+### Hitos tecnicos
 - Refactor a persistencia multiusuario en Supabase.
 - Login/registro de usuario de aplicacion y onboarding inicial.
 - Onboarding enriquecido: creacion/persistencia de athlete_knowledge inicial con perfil + datos MCP.
@@ -21,96 +23,94 @@
 - Correccion de busqueda de actividades por fecha (campo start_time snake_case del MCP).
 - Auto-login con contrasena cifrada Fernet: al arrancar, si el usuario existe, accede directamente sin pedir password. Flujo de recuperacion si la contrasena de Garmin Connect cambia.
 - Politica de herramientas MCP implementada para runtime: guia de enrutado por intencion (consulta diaria, analisis profundo, planificacion, etc.) y referencia desde el system prompt para reducir tokens y latencia.
-- Compatibilidad MCP actualizada para cambios de contrato: `get_body_battery` y `get_body_composition` con `start_date`/`end_date`.
-- Compatibilidad MCP para PRs: endpoint vigente `get_personal_record` (singular) con alias defensivo del plural.
+- Compatibilidad MCP actualizada para cambios de contrato: get_body_battery y get_body_composition con start_date/end_date.
+- Compatibilidad MCP para PRs: endpoint vigente get_personal_record (singular) con alias defensivo del plural.
 - Consulta de records personales mejorada: respuesta directa en tabla de running y follow-up contextual de distancias/marcas.
-- Consulta de records por deporte mejorada: separación running/ciclismo (sin mezclar disciplinas si no se pide).
-- Categorías de récords personales traducidas al español en la salida al usuario.
-- Separación explícita objetivo (`goals`) vs plan activo (`training_plan`) en el perfil de usuario.
-- Estado proactivo de arranque condicionado por `training_plan`: sin plan muestra "No tienes plan asignado. ¿Qué quieres hacer hoy?"; con plan propone ajustar la sesión diaria al plan.
-- Ruta determinista para estado del plan en chat: preguntas como "¿tengo plan?" y "¿cuál es ese plan?" se responden desde `training_plan` real sin depender de inferencia libre del LLM.
-- Prompting reforzado con variantes de intención para estado de plan y regla explícita: `goals` no implica plan activo.
-- Prompting reforzado para formato de fecha de salida en España (`DD/MM/AAAA`) y para respuestas completas en métricas de máximos/mínimos (valor + actividad + fecha).
-- Prompting reforzado con checklist MCP mínimo por intención para consultas operativas (estado diario, ajuste de sesión, planificación/ajuste, dolor/sobrecarga y máximos/mínimos).
-- Punto 10 cerrado: MCP en modo coach solo consulta. Política explícita en prompts y enforcement técnico en runtime con bloqueo de tools de escritura.
-- Punto 11 en progreso: Fase 1 y Fase 2 completadas (planes DB-first con versionado y resolución de plan activo desde tablas dedicadas).
-- Punto 11: Fase 3 completada con comandos CLI de gestión de planes (`/plan crear`, `/plan listar`, `/plan activar`, `/plan ver`).
-- Punto 11: Fase 5 completada (generación/ajuste funcional de planes con validación estructural y resumen de cambios por versión).
+- Consulta de records por deporte mejorada: separacion running/ciclismo (sin mezclar disciplinas si no se pide).
+- Categorias de records personales traducidas al espanol en la salida al usuario.
+- Separacion explicita objetivo (goals) vs plan activo (training_plan) en el perfil de usuario.
+- Estado proactivo de arranque condicionado por training_plan: sin plan muestra "No tienes plan asignado. Que quieres hacer hoy?"; con plan propone ajustar la sesion diaria al plan.
+- Ruta determinista para estado del plan en chat: preguntas como "tengo plan?" y "cual es ese plan?" se responden desde training_plan real sin depender de inferencia libre del LLM.
+- Prompting reforzado con variantes de intencion para estado de plan y regla explicita: goals no implica plan activo.
+- Prompting reforzado para formato de fecha de salida en Espana (DD/MM/AAAA) y para respuestas completas en metricas de maximos/minimos (valor + actividad + fecha).
+- Prompting reforzado con checklist MCP minimo por intencion para consultas operativas (estado diario, ajuste de sesion, planificacion/ajuste, dolor/sobrecarga y maximos/minimos).
+
+### Puntos cerrados
+
+#### 10) [COMPLETADO] MCP solo consulta para coaching
+- Prompts alineados: el MCP se usa para consulta de datos y el coach (LLM) hace planificacion/recomendaciones.
+- Runtime endurecido: filtrado de tools de escritura en initialize y bloqueo en loop de tool-calls si llega una peticion mutadora.
+- Cobertura de tests para garantizar que no se ejecutan tools de escritura en modo read-only.
+
+#### 11) [COMPLETADO] Planes de entrenamiento
+- Fase 1 completada: tablas dedicadas en Supabase (training_plan, training_plan_session, training_plan_version) con una sola planificacion activa por usuario.
+- Fase 1 completada: capa storage con creacion, actualizacion, activacion, listado, sesiones y versionado automatico por edicion.
+- Fase 2 completada: trainer_agent prioriza DB como fuente de verdad del plan activo y mantiene fallback backward-compatible a user_profile.training_plan.
+- Fase 2 completada: fallback de planificacion persistido en tablas dedicadas (no solo en perfil).
+- Fase 3 completada: comandos de gestion de planes (/plan crear, /plan listar, /plan activar, /plan ver).
+- Fase 4 completada: validacion funcional del prompting para generacion/manejo de planes + documentacion y tests de regresion.
+- Fase 5 completada (v1 funcional): generacion estructurada en runtime, validacion previa a persistencia, versionado por edicion y resumen de cambios entre versiones.
 
 ---
 
-## Prioridad alta
+## ⏳ Pendiente
 
-### 1) Endurecimiento final post-implementacion
+### Prioridad alta
+
+#### 1) Endurecimiento final post-implementacion
 - Al terminar implementacion (fuera de diseno y pruebas funcionales), ejecutar bateria de seguridad.
 - Incluir: secretos, datos sensibles, configuraciones inseguras, dependencias y transporte.
 - Aplicar remediaciones antes de declarar cierre del proyecto.
 
----
+### Prioridad media
 
-## Prioridad media
-
-### 2) Refactor por capas
+#### 2) Refactor por capas
 - Separar claramente presentacion (CLI), negocio (coach) y datos (Garmin/LLM/storage).
-- Reducir acoplamiento entre `agent/main.py` y `agent/trainer_agent.py`.
+- Reducir acoplamiento entre agent/main.py y agent/trainer_agent.py.
 - Definir interfaces internas para facilitar cambios de proveedor y testing.
 
-### 4) Logging de produccion
+#### 4) Logging de produccion
 - Sustituir mensajes debug de consola por logging con niveles configurables.
 - Controlar verbosidad por entorno.
 
----
+### Prioridad baja
 
-## Prioridad baja
-
-### 5) Dashboard de metricas
+#### 5) Dashboard de metricas
 - Explorar panel web opcional para tendencias (HRV, VO2max, sueno, estres, carga).
 - Evaluar Streamlit como primer candidato.
 
-### 6) Resumen diario automatizado
+#### 6) Resumen diario automatizado
 - Ejecutar resumen diario programado (Windows Task Scheduler).
 - Salida por Telegram o email.
 
+### Backlog abierto
+
+#### 8) Gestion de tokens por proveedor LLM
+- Evaluar tabla dedicada de tokens con campo de proveedor para soportar multiples LLM de forma ordenada.
+
+#### 9) Congelado del codigo MCP
+- Evaluar vendorizar/congelar el codigo MCP en el repo para evitar roturas por cambios upstream.
+
+#### 12) Naming del producto
+- Definir nombre final de la aplicacion.
+
+#### 13) Cuantificacion de carga y fatiga (TSS/ATL/TSB)
+- El agente debe cuantificar carga de entrenamiento y fatiga usando datos de rendimiento, historial de entrenamiento y estado fisico actual.
+- Incorporar un modelo inspirado en TrainingPeaks: TSS (carga), ATL (fatiga aguda), CTL (fitness) y TSB (forma/disponibilidad).
+- Calcular TSS por sesion y agregado diario/semanal para ajustar el plan de entrenamiento y prevenir sobrecarga.
+- Mantener ATL/CTL/TSB como series temporales para detectar tendencia de fatiga, picos de carga y periodos de riesgo.
+- Definir valores objetivo y rangos normales por atleta (perfil individual), no solo umbrales genericos.
+- Incluir reglas de actuacion en prompting segun rangos de TSS/ATL/TSB:
+- Si hay fatiga alta o TSB muy negativo -> reducir intensidad/volumen y priorizar recuperacion.
+- Si hay buena disponibilidad (TSB adecuado) -> permitir calidad o progresion controlada.
+- Si hay sobrecarga sostenida -> activar descarga y recomendaciones preventivas de lesion.
+- Identificar patrones de carga/fatiga a medio plazo y proponer ajustes de microciclo/mesociclo.
+- Dar feedback continuo al atleta sobre su estado de carga/fatiga y el por que de cada ajuste recomendado.
+- Adaptar recomendaciones en tiempo real cuando cambie el estado del atleta (sueno, HRV, estres, sensaciones, rendimiento).
+
+---
 
 ## Notas de mantenimiento
 - Mantener TODO sincronizado con decisiones de arquitectura reales.
 - Evitar registrar aqui tareas ya completadas salvo resumen corto de hitos.
 - Regla de equipo: documentar siempre los cambios antes de hacer commit.
-
-
-### 8) ANtiguamente guardabamos los tokens en una tabla llamda gemini o algo similar. TEndría sentido diferenciar en bbdd una tabla con toknes y en esa tabla cada uno de los proveedores de LLM?
-
-
-Seria necesario diferenciar en la base de datos una tabla para tokens y dentro de esa tabla, tener un campo que indique el proveedor de LLM correspondiente a cada token. Esto permitiría gestionar múltiples proveedores de manera más organizada y facilitaría la administración de tokens según el proveedor utilizado.
-
-### 9) Congelado del código del MCP
-
-Seria necesario bajar a este proyecto el codigo del mcp para evitar posibles cambios y que algo no funcione en el futuro. Esto permitiría tener un control total sobre la versión del MCP que se está utilizando y evitar problemas de compatibilidad o cambios inesperados en la API que puedan afectar al funcionamiento del proyecto.
-
-### 10) [COMPLETADO] MCP solo consulta para coaching
-Implementado en prompts y en ejecución:
-- Prompts alineados: el MCP se usa para consulta de datos y el coach (LLM) hace planificación/recomendaciones.
-- Runtime endurecido: filtrado de tools de escritura en `initialize` y bloqueo en loop de tool-calls si llega una petición mutadora.
-- Cobertura de tests añadida para garantizar que no se ejecutan tools de escritura en modo read-only.
-
-
-### 11) [COMPLETADO] Planes de entrenamiento
-Estado actual:
-- Fase 1 completada: tablas dedicadas en Supabase (`training_plan`, `training_plan_session`, `training_plan_version`) con una sola planificación activa por usuario.
-- Fase 1 completada: capa `storage` con creación, actualización, activación, listado, sesiones y versionado automático por edición.
-- Fase 2 completada: `trainer_agent` prioriza DB como fuente de verdad del plan activo y mantiene fallback backward-compatible a `user_profile.training_plan`.
-- Fase 2 completada: fallback de planificación persistido en tablas dedicadas (no solo en perfil).
-
-Estado de cierre del punto 11:
-- Fase 3 completada: comandos de gestión de planes (`/plan crear`, `/plan listar`, `/plan activar`, `/plan ver`).
-- Fase 4 completada: validación funcional del prompting para generación/manejo de planes + documentación y tests de regresión.
-
-- Fase 5 completada (v1 funcional): generación estructurada en runtime, validación previa a persistencia, versionado por edición y resumen de cambios entre versiones.
-
-- Fase 5: La creación de un plan de entrenamiento es un proceso complejo que requiere tener en cuenta múltiples factores, como el nivel de condición física del atleta, sus objetivos, su disponibilidad de tiempo, su historial de lesiones y su capacidad de recuperación. Para crear un plan de entrenamiento efectivo, es importante seguir un enfoque estructurado y personalizado que se adapte a las necesidades individuales del atleta. Deberian de guardarse en la base de datos los planes de entrenamiento creados para que el agente pueda acceder a ellos y hacer recomendaciones basadas en el plan de entrenamiento del atleta. Deberiamos de tener en cuenta que el plan de entrenamiento puede cambiar a lo largo del tiempo, por lo que el agente debe ser capaz de adaptarse a los cambios y hacer recomendaciones actualizadas en función del plan de entrenamiento vigente. Cada plan debería tener un titulo, una descripción, un objetivo, un nivel de dificultad, una duración y un conjunto de sesiones de entrenamiento. Cada sesión debería tener un tipo de entrenamiento (carrera, fuerza, movilidad, etc.), una duración, una intensidad y un conjunto de ejercicios específicos. El agente debería ser capaz de analizar el plan de entrenamiento y hacer recomendaciones personalizadas para cada sesión en función del estado físico del atleta y su progreso a lo largo del tiempo.EL atleta podría cambiar el plan de entrenamiento en cualquier momento, por lo que el agente debería ser capaz de adaptarse a los cambios y hacer recomendaciones actualizadas en función del plan de entrenamiento vigente; de ser así, guardariamos el nuevo plan en un registro diferente por si el atleta quiere volver al plan anterior. El agente deberia fijarse tambien en marcas personales y records del atleta para hacer recomendaciones personalizadas en función de su nivel de rendimiento y sus objetivos. El agente debería ser capaz de analizar los datos del atleta y hacer recomendaciones personalizadas para cada sesión en función de su estado físico, su progreso y sus objetivos a largo plazo. El agente debería ser capaz de identificar patrones en el rendimiento del atleta y hacer recomendaciones para mejorar su rendimiento a lo largo del tiempo. El agente debería ser capaz de identificar áreas de mejora en el plan de entrenamiento y hacer recomendaciones para optimizar el plan en función de los objetivos del atleta. El agente debería ser capaz de proporcionar retroalimentación continua al atleta sobre su progreso y su rendimiento, y hacer recomendaciones para mejorar su rendimiento a lo largo del tiempo. El agente debería ser capaz de adaptarse a los cambios en el estado físico del atleta y hacer recomendaciones actualizadas en función de su progreso y sus objetivos a largo plazo.
-
-### 12) Que nombre le damos a esta aplicación?
-
-
-### 13) Cuantificación de la carga de entrenamiento y fatiga
-El agente debería ser capaz de cuantificar la carga de entrenamiento y la fatiga del atleta en función de sus datos de rendimiento, su historial de entrenamiento y su estado físico actual. Esto permitiría ajustar los planes de entrenamiento y las recomendaciones para optimizar el rendimiento y prevenir lesiones.EN Training Peaks se utiliza el concepto de TSS (Training Stress Score) para cuantificar la carga de entrenamiento y la fatiga del atleta. El agente debería ser capaz de calcular el TSS en función de los datos de rendimiento del atleta y utilizarlo para ajustar los planes de entrenamiento y las recomendaciones. El agente debería ser capaz de identificar patrones en la carga de entrenamiento y la fatiga del atleta y hacer recomendaciones para optimizar el rendimiento y prevenir lesiones. El agente debería ser capaz de proporcionar retroalimentación continua al atleta sobre su carga de entrenamiento y su fatiga, y hacer recomendaciones para mejorar su rendimiento a lo largo del tiempo. El agente debería ser capaz de adaptarse a los cambios en la carga de entrenamiento y la fatiga del atleta y hacer recomendaciones actualizadas en función de su progreso y sus objetivos a largo plazo. El prompting deberia tener una sección que explique como debe actuar el agente para calcular TSS, ATL y TSB (Estado fisico, fatiga y forma) y como debe actuar en función de esos valores. El agente sabrá que valores de TSS, ATL y TSB son normales para el atleta en función de su historial de entrenamiento y su estado físico actual. El agente debería ser capaz de identificar patrones en la carga de entrenamiento y la fatiga del atleta y hacer recomendaciones para optimizar el rendimiento y prevenir lesiones. El agente debería ser capaz de proporcionar retroalimentación continua al atleta sobre su carga de entrenamiento y su fatiga, y hacer recomendaciones para mejorar su rendimiento a lo largo del tiempo. El agente debería ser capaz de adaptarse a los cambios en la carga de entrenamiento y la fatiga del atleta y hacer recomendaciones actualizadas en función de su progreso y sus objetivos a largo plazo.

@@ -325,7 +325,9 @@ garmin-ai-coach/
 ├── memory/                # Base de conocimiento local opcional (RAG).
 │   └── .gitkeep
 ├── prompts/
-│   └── system_prompt.md   # Personalidad, herramientas MCP y protocolos del entrenador.
+│   ├── system_prompt.md            # Prompt principal: personalidad, protocolos y uso de MCP por intención.
+│   ├── system_prompt_compact.md    # Versión compacta del prompt para reducir tokens manteniendo reglas críticas.
+│   └── mcp_tool_routing_guide.md   # Guía operativa de enrutado de tools MCP por intención.
 ├── supabase/
 │   └── schema.sql         # DDL para crear las tablas en Supabase (ejecutar en SQL Editor).
 ├── tests/
