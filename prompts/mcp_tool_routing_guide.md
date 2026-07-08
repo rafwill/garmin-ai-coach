@@ -109,9 +109,7 @@ Secuencia prioritaria:
 4. `get_training_status`
 
 Heuristica minima:
-- Si cae HRV + sube carga aguda + sube estres: bajar intensidad.
 
----
 
 ## 7) Planificacion semanal
 
@@ -122,6 +120,26 @@ Secuencia prioritaria:
 4. `get_weekly_steps`
 5. `get_weekly_stress`
 6. `get_race_predictions`
+
+## 7.2) Generacion y gestion funcional de planes
+
+Cuando la intencion sea de plan de entrenamiento, separar:
+
+1. Estado del plan:
+- Resolver con `training_plan` activo (no con `goals`).
+
+2. Generacion/ajuste de plan:
+- El coach genera propuesta estructurada con sesiones y criterios de ajuste por fatiga.
+- Si hay cambios, tratarlos como nueva version conceptual del plan.
+
+3. Gestion persistente del plan (CLI):
+- Crear: `/plan crear`
+- Listar: `/plan listar`
+- Ver detalle: `/plan ver <plan_id>`
+- Activar: `/plan activar <plan_id>`
+
+Regla:
+- No afirmar que un plan se guardó o activó sin ejecutar una accion de gestion real.
 
 ## 7.1) Estado del plan (si tiene plan o no)
 

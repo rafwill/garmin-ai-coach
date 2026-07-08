@@ -177,6 +177,26 @@ class TestSystemPromptPlanStatusRules:
         assert "training_plan" in prompt
 
 
+class TestSystemPromptPlanManagementRules:
+    def test_full_prompt_includes_functional_plan_management(self):
+        prompt = _load_system_prompt(compact=False)
+        assert "Generacion y manejo funcional de planes (OBLIGATORIO)" in prompt
+        assert "/plan crear" in prompt
+        assert "/plan listar" in prompt
+        assert "/plan ver <plan_id>" in prompt
+        assert "/plan activar <plan_id>" in prompt
+        assert "No afirmes que un plan quedó guardado/activado" in prompt
+
+    def test_compact_prompt_includes_functional_plan_management(self):
+        prompt = _load_system_prompt(compact=True)
+        assert "Generación y manejo de planes (OBLIGATORIO)" in prompt
+        assert "/plan crear" in prompt
+        assert "/plan listar" in prompt
+        assert "/plan ver <plan_id>" in prompt
+        assert "/plan activar <plan_id>" in prompt
+        assert "nueva versión" in prompt or "nueva version" in prompt
+
+
 # ─── _strip_garmin_object ─────────────────────────────────────────────────────
 
 class TestStripGarminObject:
