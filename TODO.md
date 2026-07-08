@@ -31,6 +31,7 @@
 - Ruta determinista para estado del plan en chat: preguntas como "¿tengo plan?" y "¿cuál es ese plan?" se responden desde `training_plan` real sin depender de inferencia libre del LLM.
 - Prompting reforzado con variantes de intención para estado de plan y regla explícita: `goals` no implica plan activo.
 - Prompting reforzado para formato de fecha de salida en España (`DD/MM/AAAA`) y para respuestas completas en métricas de máximos/mínimos (valor + actividad + fecha).
+- Prompting reforzado con checklist MCP mínimo por intención para consultas operativas (estado diario, ajuste de sesión, planificación/ajuste, dolor/sobrecarga y máximos/mínimos).
 - Punto 10 cerrado: MCP en modo coach solo consulta. Política explícita en prompts y enforcement técnico en runtime con bloqueo de tools de escritura.
 - Punto 11 en progreso: Fase 1 y Fase 2 completadas (planes DB-first con versionado y resolución de plan activo desde tablas dedicadas).
 - Punto 11: Fase 3 completada con comandos CLI de gestión de planes (`/plan crear`, `/plan listar`, `/plan activar`, `/plan ver`).

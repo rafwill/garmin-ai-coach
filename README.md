@@ -34,6 +34,7 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
   - Por defecto, el agente opera con `MCP_READ_ONLY=true`.
   - Las tools MCP de escritura se filtran y bloquean en runtime (`create_`, `update_`, `delete_`, `schedule_`, `upload_`, `add_`, `set_`).
   - El MCP aporta datos; la planificación y recomendaciones las realiza el coach (LLM).
+  - El prompting incluye checklist MCP mínimo por intención (estado diario, ajuste de sesión, planificación/ajuste de plan, dolor/sobrecarga y máximos/mínimos) para reducir respuestas genéricas.
   - Solo para mantenimiento/admin se puede desactivar con `MCP_READ_ONLY=false`.
 
 * **👤 Perfil de usuario sincronizado:**
