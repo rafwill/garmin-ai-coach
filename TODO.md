@@ -34,6 +34,7 @@
 - Punto 10 cerrado: MCP en modo coach solo consulta. Política explícita en prompts y enforcement técnico en runtime con bloqueo de tools de escritura.
 - Punto 11 en progreso: Fase 1 y Fase 2 completadas (planes DB-first con versionado y resolución de plan activo desde tablas dedicadas).
 - Punto 11: Fase 3 completada con comandos CLI de gestión de planes (`/plan crear`, `/plan listar`, `/plan activar`, `/plan ver`).
+- Punto 11: Fase 5 completada (generación/ajuste funcional de planes con validación estructural y resumen de cambios por versión).
 
 ---
 
@@ -92,16 +93,18 @@ Implementado en prompts y en ejecución:
 - Cobertura de tests añadida para garantizar que no se ejecutan tools de escritura en modo read-only.
 
 
-### 11) [EN PROGRESO] Planes de entrenamiento
+### 11) [COMPLETADO] Planes de entrenamiento
 Estado actual:
 - Fase 1 completada: tablas dedicadas en Supabase (`training_plan`, `training_plan_session`, `training_plan_version`) con una sola planificación activa por usuario.
 - Fase 1 completada: capa `storage` con creación, actualización, activación, listado, sesiones y versionado automático por edición.
 - Fase 2 completada: `trainer_agent` prioriza DB como fuente de verdad del plan activo y mantiene fallback backward-compatible a `user_profile.training_plan`.
 - Fase 2 completada: fallback de planificación persistido en tablas dedicadas (no solo en perfil).
 
-Pendiente para cierre del punto 11:
+Estado de cierre del punto 11:
 - Fase 3 completada: comandos de gestión de planes (`/plan crear`, `/plan listar`, `/plan activar`, `/plan ver`).
 - Fase 4 completada: validación funcional del prompting para generación/manejo de planes + documentación y tests de regresión.
+
+- Fase 5 completada (v1 funcional): generación estructurada en runtime, validación previa a persistencia, versionado por edición y resumen de cambios entre versiones.
 
 - Fase 5: La creación de un plan de entrenamiento es un proceso complejo que requiere tener en cuenta múltiples factores, como el nivel de condición física del atleta, sus objetivos, su disponibilidad de tiempo, su historial de lesiones y su capacidad de recuperación. Para crear un plan de entrenamiento efectivo, es importante seguir un enfoque estructurado y personalizado que se adapte a las necesidades individuales del atleta. Deberian de guardarse en la base de datos los planes de entrenamiento creados para que el agente pueda acceder a ellos y hacer recomendaciones basadas en el plan de entrenamiento del atleta. Deberiamos de tener en cuenta que el plan de entrenamiento puede cambiar a lo largo del tiempo, por lo que el agente debe ser capaz de adaptarse a los cambios y hacer recomendaciones actualizadas en función del plan de entrenamiento vigente. Cada plan debería tener un titulo, una descripción, un objetivo, un nivel de dificultad, una duración y un conjunto de sesiones de entrenamiento. Cada sesión debería tener un tipo de entrenamiento (carrera, fuerza, movilidad, etc.), una duración, una intensidad y un conjunto de ejercicios específicos. El agente debería ser capaz de analizar el plan de entrenamiento y hacer recomendaciones personalizadas para cada sesión en función del estado físico del atleta y su progreso a lo largo del tiempo.EL atleta podría cambiar el plan de entrenamiento en cualquier momento, por lo que el agente debería ser capaz de adaptarse a los cambios y hacer recomendaciones actualizadas en función del plan de entrenamiento vigente; de ser así, guardariamos el nuevo plan en un registro diferente por si el atleta quiere volver al plan anterior. El agente deberia fijarse tambien en marcas personales y records del atleta para hacer recomendaciones personalizadas en función de su nivel de rendimiento y sus objetivos. El agente debería ser capaz de analizar los datos del atleta y hacer recomendaciones personalizadas para cada sesión en función de su estado físico, su progreso y sus objetivos a largo plazo. El agente debería ser capaz de identificar patrones en el rendimiento del atleta y hacer recomendaciones para mejorar su rendimiento a lo largo del tiempo. El agente debería ser capaz de identificar áreas de mejora en el plan de entrenamiento y hacer recomendaciones para optimizar el plan en función de los objetivos del atleta. El agente debería ser capaz de proporcionar retroalimentación continua al atleta sobre su progreso y su rendimiento, y hacer recomendaciones para mejorar su rendimiento a lo largo del tiempo. El agente debería ser capaz de adaptarse a los cambios en el estado físico del atleta y hacer recomendaciones actualizadas en función de su progreso y sus objetivos a largo plazo.
 

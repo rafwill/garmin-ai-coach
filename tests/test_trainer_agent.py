@@ -34,6 +34,7 @@ from agent.trainer_agent import (
     _compact_tool_result,
     _extract_activities_list,
     _extract_iso_date_from_text,
+    _generate_structured_plan_payload,
     _GeminiCompletions,
     _get_active_training_plan,
     _has_goal_in_profile,
@@ -44,6 +45,7 @@ from agent.trainer_agent import (
     _is_planning_intent,
     _is_write_mcp_tool,
     _resolve_activity_id_from_query,
+    _summarize_plan_changes,
     _is_activity_in_last_48h,
     _is_no_data_result,
     _normalize_trend_date_range,
@@ -55,6 +57,7 @@ from agent.trainer_agent import (
     _retrieve_athlete_knowledge,
     _seconds_to_hhmmss,
     _strip_garmin_object,
+    _validate_structured_plan,
 )
 
 
@@ -1003,6 +1006,9 @@ class TestPlanningFallbackAndRanges:
     def test_plan_status_intent_false_for_plan_creation_request(self):
         assert not _is_plan_status_intent("Puedes planificarme la semana?")
 
+    def test_plan_status_intent_false_for_plan_adjustment_request(self):
+        assert not _is_plan_status_intent("Ajusta mi plan de esta semana")
+
     def test_has_goal_in_profile(self):
         profile = {"goals": {"target_race": "10k", "target_race_date": "2026-11-22"}}
         assert _has_goal_in_profile(profile)
@@ -1087,6 +1093,39 @@ class TestPlanningFallbackAndRanges:
         assert "22/11/2026" in out
         assert "Rodaje Z2 50 min" in out
 
+    def test_generate_structured_plan_payload_returns_plan_and_sessions(self):
+        profile = {
+            "goals": {
+                "target_race": "10K",
+                "target_race_date": (date.today() + timedelta(days=56)).isoformat(),
+                "weekly_training_hours": 7,
+            },
+            "health": {},
+        }
+        plan, sessions = _generate_structured_plan_payload(profile, "Planifícame para mi 10K")
+        assert plan["title"].startswith("Plan hacia")
+        assert plan["duration_weeks"] >= 4
+        assert len(sessions) == 7
+
+    def test_validate_structured_plan_flags_invalid_session_day(self):
+        plan = {
+            "title": "Plan",
+            "objective": "Objetivo",
+            "duration_weeks": 8,
+        }
+        sessions = [{"day_index": 9, "duration_min": 40, "session_type": "running_z2"}]
+        errors = _validate_structured_plan(plan, sessions, {"goals": {"weekly_training_hours": 6}})
+        assert any("día fuera de rango" in e for e in errors)
+
+    def test_summarize_plan_changes_includes_duration_and_volume(self):
+        previous_plan = {"duration_weeks": 8, "difficulty": "moderate"}
+        new_plan = {"duration_weeks": 10, "difficulty": "hard"}
+        previous_sessions = [{"duration_min": 40}, {"duration_min": 60}]
+        new_sessions = [{"duration_min": 50}, {"duration_min": 70}]
+        out = _summarize_plan_changes(previous_plan, new_plan, previous_sessions, new_sessions)
+        assert "Duración" in out
+        assert "Volumen semanal estimado" in out
+
 
 class TestPlanStatusChatRoute:
     @pytest.mark.asyncio
@@ -1117,20 +1156,8 @@ class TestPlanStatusChatRoute:
         assert len(agent.conversation_history) == 2
 
     @pytest.mark.asyncio
-    async def test_chat_fallback_planning_persists_plan_in_storage(self):
+    async def test_chat_planning_generates_structured_plan_without_llm(self):
         from agent.trainer_agent import TrainerAgent
-
-        msg_final = MagicMock()
-        msg_final.tool_calls = None
-        msg_final.content = "Lo siento, pero no puedo crear una planificación para tu objetivo sin más información"
-
-        choice = MagicMock()
-        choice.message = msg_final
-        choice.finish_reason = "stop"
-
-        response = MagicMock()
-        response.choices = [choice]
-        response.usage = None
 
         agent = object.__new__(TrainerAgent)
         agent.user_profile = {
@@ -1150,13 +1177,15 @@ class TestPlanStatusChatRoute:
         agent.client = MagicMock()
         agent.client.chat = MagicMock()
         agent.client.chat.completions = MagicMock()
-        agent.client.chat.completions.create = AsyncMock(return_value=response)
+        agent.client.chat.completions.create = AsyncMock(side_effect=AssertionError("LLM should not be called"))
 
-        with patch("agent.trainer_agent._storage.create_training_plan", return_value={
+        with patch("agent.trainer_agent._storage.get_active_training_plan", return_value=None), patch("agent.trainer_agent._storage.create_training_plan", return_value={
             "id": "plan-db-1",
             "title": "Plan hacia 10K",
             "status": "active",
-            "source": "agent_goal_fallback",
+            "source": "agent_structured_plan",
+            "duration_weeks": 8,
+            "difficulty": "moderate",
             "plan_data": {
                 "target_race": "10K",
                 "target_race_date": "2026-11-22",
@@ -1164,9 +1193,102 @@ class TestPlanStatusChatRoute:
         }) as mocked_create, patch("agent.trainer_agent._save_user_profile"), patch("agent.trainer_agent._save_history_entry"):
             out = await TrainerAgent.chat(agent, "Puedes planificarme la semana para mi 10K?")
 
-        assert "Planificación Inicial para tu Objetivo" in out
+        assert "Resumen" in out
+        assert "Plan activo: Plan hacia 10K" in out
         mocked_create.assert_called_once()
         assert agent.user_profile["training_plan"]["id"] == "plan-db-1"
+
+    @pytest.mark.asyncio
+    async def test_chat_planning_updates_existing_plan_and_reports_changes(self):
+        from agent.trainer_agent import TrainerAgent
+
+        agent = object.__new__(TrainerAgent)
+        agent.user_profile = {
+            "goals": {
+                "target_race": "10K",
+                "target_race_date": "2026-11-22",
+                "weekly_training_hours": 8,
+            },
+            "health": {},
+        }
+        agent.conversation_history = []
+        agent.tools_schema = []
+        agent.mcp_session = MagicMock()
+        agent.mcp_read_only = True
+        agent.model = "test-model"
+        agent._build_messages = lambda _msg: []
+        agent.client = MagicMock()
+        agent.client.chat = MagicMock()
+        agent.client.chat.completions = MagicMock()
+        agent.client.chat.completions.create = AsyncMock(side_effect=AssertionError("LLM should not be called"))
+
+        existing = {
+            "id": "plan-db-1",
+            "title": "Plan actual 10K",
+            "objective": "Preparación 10K",
+            "difficulty": "moderate",
+            "duration_weeks": 8,
+            "status": "active",
+            "source": "agent_structured_plan",
+            "plan_data": {"target_race": "10K", "target_race_date": "2026-11-22"},
+        }
+
+        with patch("agent.trainer_agent._storage.get_active_training_plan", return_value=existing), patch(
+            "agent.trainer_agent._storage.list_training_plan_sessions",
+            return_value=[
+                {"duration_min": 40, "day_index": 1, "session_type": "running_z2"},
+                {"duration_min": 50, "day_index": 2, "session_type": "running_quality"},
+            ],
+        ), patch("agent.trainer_agent._storage.update_training_plan", return_value={
+            "id": "plan-db-1",
+            "title": "Plan hacia 10K",
+            "objective": "Preparación para 10K",
+            "difficulty": "moderate",
+            "duration_weeks": 10,
+            "status": "active",
+            "source": "agent_structured_plan",
+            "plan_data": {"target_race": "10K", "target_race_date": "2026-11-22"},
+        }) as mocked_update, patch("agent.trainer_agent._storage.create_training_plan") as mocked_create, patch(
+            "agent.trainer_agent._save_user_profile"
+        ), patch("agent.trainer_agent._save_history_entry"):
+            out = await TrainerAgent.chat(agent, "Ajusta mi plan de esta semana")
+
+        mocked_update.assert_called_once()
+        mocked_create.assert_not_called()
+        assert "Cambios de versión" in out or "Cambios de version" in out
+        assert "Volumen semanal estimado" in out
+
+    @pytest.mark.asyncio
+    async def test_chat_planning_validation_error_returns_user_facing_message(self):
+        from agent.trainer_agent import TrainerAgent
+
+        agent = object.__new__(TrainerAgent)
+        agent.user_profile = {
+            "goals": {"target_race": "10K", "target_race_date": "2026-11-22"},
+            "health": {},
+        }
+        agent.conversation_history = []
+        agent.tools_schema = []
+        agent.mcp_session = MagicMock()
+        agent.mcp_read_only = True
+        agent.model = "test-model"
+        agent._build_messages = lambda _msg: []
+        agent.client = MagicMock()
+        agent.client.chat = MagicMock()
+        agent.client.chat.completions = MagicMock()
+        agent.client.chat.completions.create = AsyncMock(side_effect=AssertionError("LLM should not be called"))
+
+        with patch("agent.trainer_agent._storage.get_active_training_plan", return_value=None), patch(
+            "agent.trainer_agent._validate_structured_plan", return_value=["Error de validación de prueba"]
+        ), patch("agent.trainer_agent._storage.create_training_plan") as mocked_create, patch(
+            "agent.trainer_agent._storage.update_training_plan"
+        ) as mocked_update, patch("agent.trainer_agent._save_history_entry"):
+            out = await TrainerAgent.chat(agent, "Planifícame para mi 10K")
+
+        mocked_create.assert_not_called()
+        mocked_update.assert_not_called()
+        assert "No pude persistir el plan propuesto" in out
+        assert "Error de validación de prueba" in out
 
 
 class TestMcpReadOnlyPolicy:

@@ -72,6 +72,9 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
 * **🗂️ Planes de entrenamiento versionados (DB-first):**
   - Los planes se guardan en tablas dedicadas de Supabase (`training_plan`, `training_plan_session`, `training_plan_version`).
   - Cada edición del plan genera una nueva versión (snapshot) para trazabilidad.
+  - Generación/ajuste funcional de planes por ruta determinista en runtime (sin depender del LLM para persistir/activar).
+  - Validación previa de coherencia (duración, sesiones, carga semanal y rangos de día) antes de guardar.
+  - Resumen de cambios entre versiones (duración, dificultad, sesiones y volumen semanal) visible en la respuesta del coach.
   - Existe una única fuente de verdad de plan activo por usuario (máximo uno activo a la vez).
   - Compatibilidad backward: el perfil mantiene `training_plan` como espejo temporal para rutas legacy.
 

@@ -925,6 +925,7 @@ def _is_plan_status_intent(user_message: str) -> bool:
     creation_markers = [
         "planifica", "planificación", "planificacion", "crear", "créame", "creame",
         "hazme", "diseña", "disena", "prepara", "recomienda", "recomiendas",
+        "ajusta", "ajusta", "modifica", "cambia", "actualiza",
     ]
     if any(marker in text for marker in creation_markers):
         return False
@@ -1284,6 +1285,293 @@ def _build_goal_plan_fallback(profile: dict) -> str:
         "- En la siguiente interacción ajustaré paces, volúmenes y progresión según tus datos Garmin recientes "
         "(carga, HRV, sueño y entrenamientos)."
     )
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _wants_new_plan_intent(user_message: str) -> bool:
+    text = (user_message or "").strip().lower()
+    if not text:
+        return False
+    markers = [
+        "nuevo plan",
+        "nuevo ciclo",
+        "desde cero",
+        "plan nuevo",
+        "crear otro plan",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _generate_structured_plan_payload(
+    profile: dict,
+    user_message: str,
+    base_plan: dict | None = None,
+) -> tuple[dict, list[dict]]:
+    """Genera un plan estructurado y sesiones semanales listas para persistir."""
+    goals = (profile or {}).get("goals", {})
+    health = (profile or {}).get("health", {})
+
+    race = str(goals.get("target_race") or "objetivo de rendimiento").strip()
+    race_date = str(goals.get("target_race_date") or "").strip()
+    target_time = str(goals.get("target_time") or "").strip()
+    weekly_hours = _safe_float(goals.get("weekly_training_hours"), 8.0)
+    weekly_hours = min(24.0, max(3.0, weekly_hours))
+
+    duration_weeks = 8
+    if race_date:
+        try:
+            days_to_race = (date.fromisoformat(race_date) - date.today()).days
+            duration_weeks = min(16, max(4, int(days_to_race / 7)))
+        except Exception:
+            duration_weeks = 8
+
+    injuries = list((health or {}).get("injuries") or [])
+    has_injuries = bool(injuries)
+
+    difficulty = "moderate"
+    if has_injuries:
+        difficulty = "easy"
+    elif weekly_hours >= 10:
+        difficulty = "hard"
+
+    weekly_minutes = int(round(weekly_hours * 60))
+    # Distribución por bloques (debe sumar 100)
+    ratios = {
+        "strength": 10,
+        "quality_1": 18,
+        "easy": 16,
+        "quality_2": 18,
+        "rest": 0,
+        "long": 28,
+        "recovery": 10,
+    }
+
+    def _dur(key: str) -> int:
+        if key == "rest":
+            return 0
+        return max(25, int(round((weekly_minutes * ratios[key]) / 100)))
+
+    long_run_min = max(_dur("long"), 70)
+    easy_intensity = "RPE 3-4"
+    quality_intensity = "RPE 7-8" if not has_injuries else "RPE 5-6"
+
+    sessions = [
+        {
+            "week_index": 1,
+            "day_index": 1,
+            "session_type": "strength",
+            "duration_min": _dur("strength"),
+            "intensity": "RPE 4-5",
+            "exercises": ["movilidad cadera/tobillo", "fuerza general", "core"],
+            "notes": "Calentamiento 10'. Parte principal de fuerza funcional. Enfriamiento 5'. Hidratación 500-750 ml.",
+        },
+        {
+            "week_index": 1,
+            "day_index": 2,
+            "session_type": "running_quality",
+            "duration_min": _dur("quality_1"),
+            "intensity": quality_intensity,
+            "exercises": ["intervalos/umbral", "técnica de carrera"],
+            "notes": "Calentamiento 15'. Parte principal de calidad por RPE. Enfriamiento 10'. Nutrición pre-sesión + hidratación 500-750 ml.",
+        },
+        {
+            "week_index": 1,
+            "day_index": 3,
+            "session_type": "running_z2",
+            "duration_min": _dur("easy"),
+            "intensity": easy_intensity,
+            "exercises": ["rodaje continuo", "movilidad breve"],
+            "notes": "Calentamiento 10'. Parte principal en Z2. Enfriamiento 5-10'. Hidratación 500 ml.",
+        },
+        {
+            "week_index": 1,
+            "day_index": 4,
+            "session_type": "running_quality",
+            "duration_min": _dur("quality_2"),
+            "intensity": quality_intensity,
+            "exercises": ["tempo/cuetas", "economía de carrera"],
+            "notes": "Calentamiento 15'. Parte principal controlada por RPE. Enfriamiento 10'. Hidratación 500-750 ml.",
+        },
+        {
+            "week_index": 1,
+            "day_index": 5,
+            "session_type": "rest",
+            "duration_min": 0,
+            "intensity": "RPE 1-2",
+            "exercises": ["descanso activo opcional"],
+            "notes": "Recuperación activa opcional: caminar/movilidad 20-30'.",
+        },
+        {
+            "week_index": 1,
+            "day_index": 6,
+            "session_type": "long_run",
+            "duration_min": long_run_min,
+            "intensity": "RPE 4-5" if not has_injuries else "RPE 3-4",
+            "exercises": ["tirada larga progresiva"],
+            "notes": "Calentamiento 10-15'. Parte principal continua. Enfriamiento 10'. Nutrición 30-60 g CH/h e hidratación 500-800 ml/h.",
+        },
+        {
+            "week_index": 1,
+            "day_index": 7,
+            "session_type": "recovery",
+            "duration_min": _dur("recovery"),
+            "intensity": "RPE 2-3",
+            "exercises": ["rodaje suave", "movilidad"],
+            "notes": "Calentamiento suave. Parte principal muy ligera. Enfriamiento corto. Hidratación 400-600 ml.",
+        },
+    ]
+
+    objective_text = f"Preparación para {race}"
+    if target_time:
+        objective_text += f" con objetivo de {target_time}"
+
+    plan = {
+        "title": f"Plan hacia {race}",
+        "description": "Plan estructurado generado por el coach a partir de objetivos y perfil del atleta.",
+        "objective": objective_text,
+        "difficulty": difficulty,
+        "duration_weeks": duration_weeks,
+        "status": "active",
+        "source": "agent_structured_plan",
+        "plan_data": {
+            "target_race": race,
+            "target_race_date": race_date,
+            "target_time": target_time,
+            "weekly_training_hours": weekly_hours,
+            "injuries": injuries,
+            "today_focus": "Sesión de calidad o ajuste por recuperación",
+            "generation_note": (user_message or "")[:240],
+            "base_plan_id": (base_plan or {}).get("id"),
+        },
+    }
+    return plan, sessions
+
+
+def _validate_structured_plan(plan: dict, sessions: list[dict], profile: dict) -> list[str]:
+    """Valida la coherencia básica del plan estructurado antes de persistir."""
+    errors: list[str] = []
+    if not isinstance(plan, dict):
+        return ["Plan inválido: formato no soportado."]
+
+    if not str(plan.get("title") or "").strip():
+        errors.append("El plan no tiene título.")
+    if not str(plan.get("objective") or "").strip():
+        errors.append("El plan no tiene objetivo definido.")
+    if int(plan.get("duration_weeks") or 0) <= 0:
+        errors.append("La duración del plan debe ser mayor que 0 semanas.")
+    if not sessions:
+        errors.append("El plan no contiene sesiones.")
+
+    weekly_minutes = 0
+    for session in sessions:
+        day_index = int(session.get("day_index") or 0)
+        if day_index < 1 or day_index > 7:
+            errors.append("Hay sesiones con día fuera de rango (1-7).")
+            break
+
+        duration = int(session.get("duration_min") or 0)
+        session_type = str(session.get("session_type") or "").strip().lower()
+        if session_type != "rest" and duration <= 0:
+            errors.append("Hay sesiones activas con duración no válida.")
+            break
+        weekly_minutes += max(0, duration)
+
+    goals = (profile or {}).get("goals", {})
+    expected_weekly_hours = _safe_float(goals.get("weekly_training_hours"), 8.0)
+    expected_weekly_min = int(max(120, expected_weekly_hours * 60))
+    if weekly_minutes > int(expected_weekly_min * 1.35):
+        errors.append("La carga semanal propuesta excede claramente las horas semanales objetivo.")
+
+    return errors
+
+
+def _summarize_plan_changes(
+    previous_plan: dict | None,
+    new_plan: dict,
+    previous_sessions: list[dict] | None,
+    new_sessions: list[dict],
+) -> str:
+    """Resume diferencias entre plan previo y nuevo para trazabilidad funcional."""
+    if not previous_plan:
+        return "Se creó un plan nuevo y se activó como plan principal."
+
+    changes: list[str] = []
+    if (previous_plan.get("duration_weeks") or 0) != (new_plan.get("duration_weeks") or 0):
+        changes.append(
+            f"Duración: {previous_plan.get('duration_weeks', 0)} -> {new_plan.get('duration_weeks', 0)} semanas"
+        )
+    if str(previous_plan.get("difficulty") or "") != str(new_plan.get("difficulty") or ""):
+        changes.append(f"Dificultad: {previous_plan.get('difficulty', 'n/d')} -> {new_plan.get('difficulty', 'n/d')}")
+
+    prev_sessions_count = len(previous_sessions or [])
+    new_sessions_count = len(new_sessions or [])
+    if prev_sessions_count != new_sessions_count:
+        changes.append(f"Sesiones semanales: {prev_sessions_count} -> {new_sessions_count}")
+
+    prev_total = sum(int((s or {}).get("duration_min") or 0) for s in (previous_sessions or []))
+    new_total = sum(int((s or {}).get("duration_min") or 0) for s in (new_sessions or []))
+    if prev_total != new_total:
+        changes.append(f"Volumen semanal estimado: {prev_total} -> {new_total} min")
+
+    if not changes:
+        return "Se registró una nueva versión sin cambios estructurales relevantes."
+    return "\n".join(f"- {item}" for item in changes)
+
+
+def _build_structured_plan_markdown(
+    plan: dict,
+    sessions: list[dict],
+    change_summary: str,
+) -> str:
+    """Construye respuesta funcional del plan con estructura accionable."""
+    title = str(plan.get("title") or "Plan de entrenamiento").strip()
+    objective = str(plan.get("objective") or "Objetivo no especificado").strip()
+    difficulty = str(plan.get("difficulty") or "moderate").strip()
+    duration_weeks = int(plan.get("duration_weeks") or 0)
+    plan_id = str(plan.get("id") or "").strip()
+
+    day_names = {
+        1: "Lunes", 2: "Martes", 3: "Miércoles", 4: "Jueves", 5: "Viernes", 6: "Sábado", 7: "Domingo"
+    }
+
+    lines = [
+        "## 🧭 Resumen",
+        f"Plan activo: {title}",
+        f"Objetivo: {objective}",
+        f"Duración: {duration_weeks} semanas · Dificultad: {difficulty}",
+    ]
+
+    if plan_id:
+        lines.append(f"ID del plan: {plan_id}")
+
+    lines.extend([
+        "",
+        "## 📅 Semana tipo (estructura)",
+    ])
+
+    for s in sorted(sessions, key=lambda x: (int(x.get("week_index") or 1), int(x.get("day_index") or 1))):
+        day = day_names.get(int(s.get("day_index") or 0), f"Día {s.get('day_index', '?')}")
+        session_type = str(s.get("session_type") or "sesión")
+        duration = int(s.get("duration_min") or 0)
+        intensity = str(s.get("intensity") or "RPE n/d")
+        lines.append(f"- {day}: {session_type} · {duration} min · {intensity}")
+
+    lines.extend([
+        "",
+        "## 🔄 Cambios de versión",
+        change_summary,
+        "",
+        "## ✅ Próximo paso",
+        "Usa `/plan listar` para revisar planes, `/plan ver <plan_id>` para detalle y `/plan activar <plan_id>` para cambiar el activo.",
+    ])
+
+    return "\n".join(lines)
 
 
 def _normalize_trend_date_range(tool_name: str, arguments: dict) -> dict:
@@ -2773,6 +3061,88 @@ class TrainerAgent:
             _save_history_entry("user", user_message)
             _save_history_entry("assistant", assistant_reply)
             return assistant_reply
+
+        # Ruta funcional de planificación: generación/actualización estructurada,
+        # persistida y versionada en DB sin depender del LLM.
+        if _is_planning_intent(user_message) and _has_goal_in_profile(self.user_profile):
+            try:
+                previous_plan_row = None
+                previous_plan = None
+                previous_sessions: list[dict] = []
+                try:
+                    previous_plan_row = _storage.get_active_training_plan()
+                    previous_plan = _normalize_storage_plan_row(previous_plan_row)
+                    if previous_plan and previous_plan.get("id"):
+                        previous_sessions = _storage.list_training_plan_sessions(str(previous_plan.get("id")))
+                except Exception:
+                    previous_plan = _get_active_training_plan(self.user_profile)
+                    previous_sessions = []
+
+                new_plan, new_sessions = _generate_structured_plan_payload(
+                    self.user_profile,
+                    user_message,
+                    base_plan=previous_plan,
+                )
+                validation_errors = _validate_structured_plan(new_plan, new_sessions, self.user_profile)
+                if validation_errors:
+                    assistant_reply = (
+                        "## ⚠️ No pude persistir el plan propuesto\n\n"
+                        + "\n".join(f"- {err}" for err in validation_errors)
+                        + "\n\nAjusta perfil/objetivo con `/perfil editar objetivo` y lo regenero."
+                    )
+                else:
+                    wants_new = _wants_new_plan_intent(user_message)
+                    if previous_plan and previous_plan.get("id") and not wants_new:
+                        persisted = _storage.update_training_plan(
+                            str(previous_plan.get("id")),
+                            {
+                                "title": new_plan.get("title"),
+                                "description": new_plan.get("description"),
+                                "objective": new_plan.get("objective"),
+                                "difficulty": new_plan.get("difficulty"),
+                                "duration_weeks": new_plan.get("duration_weeks"),
+                                "status": "active",
+                                "source": "agent_structured_plan",
+                                "plan_data": dict(new_plan.get("plan_data") or {}),
+                            },
+                            sessions=new_sessions,
+                            change_reason="agent_structured_adjustment",
+                        )
+                        persisted_plan = _normalize_storage_plan_row(persisted) or new_plan
+                    else:
+                        persisted = _storage.create_training_plan(
+                            new_plan,
+                            sessions=new_sessions,
+                            change_reason="agent_structured_creation",
+                        )
+                        persisted_plan = _normalize_storage_plan_row(persisted) or new_plan
+
+                    change_summary = _summarize_plan_changes(
+                        previous_plan,
+                        persisted_plan,
+                        previous_sessions,
+                        new_sessions,
+                    )
+                    assistant_reply = _build_structured_plan_markdown(
+                        persisted_plan,
+                        new_sessions,
+                        change_summary,
+                    )
+
+                    # Espejo backward-compatible en perfil.
+                    persisted_plan.setdefault("target_race", (new_plan.get("plan_data") or {}).get("target_race"))
+                    persisted_plan.setdefault("target_race_date", (new_plan.get("plan_data") or {}).get("target_race_date"))
+                    self.user_profile["training_plan"] = persisted_plan
+                    _save_user_profile(self.user_profile)
+
+                self.conversation_history.append({"role": "user", "content": user_message})
+                self.conversation_history.append({"role": "assistant", "content": assistant_reply})
+                _save_history_entry("user", user_message)
+                _save_history_entry("assistant", assistant_reply)
+                return assistant_reply
+            except Exception:
+                # Fallback conservador al flujo anterior
+                pass
 
         # Ruta directa para récords personales: evita respuestas de "sin acceso"
         # y asegura que se entreguen distancia + marca desde la primera respuesta.
