@@ -36,6 +36,9 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
   - Setup guiado la primera vez: deporte principal, horas/semana, próximo evento, tiempo objetivo y condiciones de salud.
   - Todos los campos del perfil se inyectan en el system prompt para que el agente te conozca desde el primer mensaje.
   - El perfil se mantiene por usuario de aplicación (multiusuario) y no se reinicia automáticamente por cambio de cuenta Garmin.
+  - El perfil diferencia entre:
+    - `goals`: objetivo deportivo (carrera, fecha, tiempo, horas/semana).
+    - `training_plan`: plan activo para el día a día (separado del objetivo).
 
 * **📚 Base de conocimiento del atleta (RAG ligero):**
   - Puedes añadir notas personales del atleta en ficheros `.md`, `.txt` o `.json`.
@@ -49,7 +52,28 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
 * **🚦 Estado proactivo al iniciar (48h):**
   - Tras seleccionar modelo y conectar herramientas, muestra un briefing automático de últimas 48h.
   - Incluye estado de Body Battery, HRV, sueño y entrenamientos recientes.
+  - Muestra fechas analizadas en formato `DD/MM/AAAA`.
+  - Recomendación inicial condicional:
+    - Sin `training_plan` activo: `No tienes plan asignado. ¿Qué quieres hacer hoy?`
+    - Con `training_plan` activo: propone adaptar la sesión de hoy al plan.
   - Sirve como punto de partida antes de la primera pregunta del chat.
+
+* **🧭 Estado de plan coherente (sin alucinaciones):**
+  - Preguntas tipo "¿tengo plan?", "¿cuál es ese plan?" o "¿sigo con el plan?" se responden por ruta determinista.
+  - La respuesta se basa en `training_plan` real (no en inferencias del LLM).
+  - `goals` se muestra como objetivo guardado, pero no se interpreta como plan activo.
+
+* **🥇 Récords personales de running (mejorado):**
+  - Consulta directa de PRs desde Garmin con `get_personal_record`.
+  - Respuesta en tabla con distancia/record y marca desde la primera interacción.
+  - Categorías traducidas al español para facilitar lectura.
+  - Follow-up contextual soportado (ej: "en qué distancias son esas marcas") sin perder acceso a datos.
+  - Filtrado priorizando registros de running para evitar mezclar ciclismo/natación en esa consulta.
+
+* **🚴 Récords por deporte (running/ciclismo):**
+  - Si el usuario pregunta por ciclismo, solo se muestran marcas de ciclismo.
+  - Si pregunta por running, solo se muestran marcas de running.
+  - Nunca se mezclan disciplinas en la misma respuesta salvo petición explícita.
 
 * **✅ Validación de inputs:**
   - `target_race_date`: formato `YYYY-MM-DD` + debe ser fecha futura.
@@ -78,6 +102,7 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
   - Al salir, el agente genera automáticamente un resumen compacto de la sesión con el propio LLM.
   - Los últimos 5 resúmenes se inyectan como contexto al arrancar la siguiente sesión — el agente recuerda lo que habéis hablado.
   - Todo el estado de usuario (perfil, historial, base de conocimiento y cuota de Gemini) se guarda en Supabase por usuario.
+  - Si el agente crea una planificación base por fallback, persiste un `training_plan` activo mínimo para distinguirlo del objetivo (`goals`).
 
 * **👥 Modo multiusuario (nuevo):**
   - Inicio con `login` o alta de `usuario nuevo` desde terminal.
@@ -250,6 +275,16 @@ Al iniciar el agente se pregunta qué conjunto de herramientas cargar:
 
 Puedes fijar el subconjunto permanentemente añadiendo `GARMIN_ENABLED_TOOLS=tool1,tool2,...` en tu `.env`.
 
+### Compatibilidad MCP (verificado local)
+
+Cambios recientes del servidor MCP de Garmin que ya están contemplados en el código:
+
+- `get_personal_record` es el endpoint vigente para récords personales (el alias plural `get_personal_records` puede no existir según versión).
+- `get_body_battery` ahora usa rango de fechas: `start_date` + `end_date`.
+- `get_body_composition` ahora usa rango de fechas: `start_date` + `end_date`.
+
+Si actualizas `garmin-mcp`, revisa estos contratos antes de desplegar cambios en prompts o rutas de tools.
+
 ---
 
 ## 📁 Estructura del Proyecto
@@ -286,7 +321,7 @@ garmin-ai-coach/
 
 ## 🧪 Tests
 
-El proyecto incluye una suite de **131 tests unitarios** que cubre las funciones críticas sin necesidad de conexión a Garmin ni a ningún LLM.
+El proyecto incluye una suite de **más de 100 tests unitarios** que cubre las funciones críticas sin necesidad de conexión a Garmin ni a ningún LLM.
 
 ### Instalar dependencias de desarrollo
 ```powershell

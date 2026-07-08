@@ -275,11 +275,13 @@ def _authenticate_or_register_user() -> tuple[str, dict, bool, str]:
                 console.print(f"[red]✗[/] {result.get('error', 'Contraseña incorrecta')}")
                 continue
 
+            # Establecer usuario activo antes de cualquier escritura en storage
+            set_active_user(result["user_id"], username)
+
             # Actualizar cifrado para el próximo arranque
             creds = result.get("credentials") or {}
             creds["garmin_password_encrypted"] = encrypt_password(password)
             update_user_credentials(creds)
-            set_active_user(result["user_id"], username)
             console.print(f"[green]✓[/] Sesión iniciada como [bold]{username}[/].")
             return username, creds, False, password
 

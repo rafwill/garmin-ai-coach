@@ -195,6 +195,40 @@ _PR_METADATA = {
     23: {"tipo": "1500m natación", "unidad": "tiempo"},
 }
 
+_PR_CATEGORY_TRANSLATIONS = {
+    "fastest 1k": "1K más rápido",
+    "fastest mile": "Milla más rápida",
+    "fastest 5k": "5K más rápido",
+    "fastest 10k": "10K más rápido",
+    "fastest half marathon": "Media maratón más rápida",
+    "fastest marathon": "Maratón más rápida",
+    "longest run": "Carrera más larga",
+    "longest ride": "Ciclismo más largo",
+    "most elevation gain cycling": "Ascenso máximo en ciclismo",
+    "fastest 40k cycling": "40K ciclismo más rápido",
+    "most steps day": "Máximos pasos en un día",
+    "most steps week": "Máximos pasos en una semana",
+    "most steps month": "Máximos pasos en un mes",
+    "longest daily goal streak": "Racha más larga de objetivo diario",
+    "longest weekly goal streak": "Racha más larga de objetivo semanal",
+    "longest pool swim": "Natación más larga en piscina",
+    "fastest 100m pool swim": "100m piscina más rápido",
+    "fastest 500m pool swim": "500m piscina más rápido",
+    "fastest 1500m pool swim": "1500m piscina más rápido",
+    "fastest 1 mile pool swim": "1 milla piscina más rápida",
+}
+
+
+def _translate_pr_category_es(category: str) -> str:
+    """Traduce categorías comunes de PR de Garmin al español para mostrar al usuario."""
+    text = (category or "").strip()
+    if not text:
+        return "Registro"
+    lowered = text.lower()
+    if lowered in _PR_CATEGORY_TRANSLATIONS:
+        return _PR_CATEGORY_TRANSLATIONS[lowered]
+    return text
+
 
 def _compact_personal_records(data: list) -> str:
     """Convierte los récords personales de Garmin a un formato compacto y legible.
@@ -205,41 +239,68 @@ def _compact_personal_records(data: list) -> str:
     for record in data:
         if not isinstance(record, dict):
             continue
-        type_id = record.get("typeId")
+        type_id = record.get("typeId") if record.get("typeId") is not None else record.get("type_id")
         value = record.get("value")
+        raw_value = record.get("raw_value") if record.get("raw_value") is not None else value
+        record_type = record.get("record_type")
         meta = _PR_METADATA.get(type_id)
         
         if meta:
             tipo_name = meta["tipo"]
             unidad = meta["unidad"]
         else:
-            tipo_name = f"typeId={type_id}"
+            tipo_name = _translate_pr_category_es(record_type) if record_type else f"typeId={type_id}"
             unidad = "valor"
             
         entry: dict = {
-            "actividad": record.get("activityName", ""),
+            "actividad": record.get("activityName") or record.get("activity_name") or "",
             "tipo": tipo_name,
-            "deporte": record.get("activityType", ""),
+            "deporte": record.get("activityType") or record.get("activity_type") or "",
+            "categoria": tipo_name if meta else (_translate_pr_category_es(record_type) if record_type else tipo_name),
+            "type_id": type_id,
+            "fecha": record.get("date") or "",
         }
         
         if value is not None:
             try:
-                v_float = float(value)
+                if isinstance(value, str) and value.strip() and (":" in value or any(ch.isalpha() for ch in value)):
+                    pretty = value.strip()
+                    if unidad == "tiempo":
+                        entry["tiempo"] = pretty
+                    elif unidad in {"distancia_km", "distancia_m_y_km"}:
+                        entry["distancia"] = pretty
+                    elif unidad == "elevacion_m":
+                        entry["elevacion"] = pretty
+                    elif unidad == "pasos":
+                        entry["pasos"] = pretty
+                    elif unidad == "dias":
+                        entry["racha"] = pretty
+                    entry["valor"] = pretty
+                    results.append(entry)
+                    continue
+
+                v_float = float(raw_value)
                 if unidad == "tiempo":
                     entry["tiempo"] = _seconds_to_hhmmss(v_float)
+                    entry["valor"] = entry["tiempo"]
                 elif unidad == "distancia_km":
                     entry["distancia"] = f"{v_float / 1000:.2f} km"
+                    entry["valor"] = entry["distancia"]
                 elif unidad == "distancia_m_y_km":
                     if v_float >= 1000:
                         entry["distancia"] = f"{v_float / 1000:.2f} km"
                     else:
                         entry["distancia"] = f"{v_float:.0f} m"
+                    entry["valor"] = entry["distancia"]
                 elif unidad == "elevacion_m":
                     entry["elevacion"] = f"{v_float:.1f} m"
+                    entry["valor"] = entry["elevacion"]
                 elif unidad == "pasos":
                     entry["pasos"] = f"{int(round(v_float)):,}"
+                    entry["valor"] = entry["pasos"]
                 elif unidad == "dias":
                     entry["racha"] = f"{int(round(v_float))} días"
+                    entry["valor"] = entry["racha"]
                 else:
                     entry["valor"] = value
             except (ValueError, TypeError):
@@ -252,7 +313,7 @@ def _compact_personal_records(data: list) -> str:
 def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
     """
     Compacta el resultado de una herramienta para que quepa en el contexto.
-    - get_personal_records: conversión específica de segundos a HH:MM:SS.
+    - get_personal_record(s): conversión específica de segundos a HH:MM:SS.
     - Arrays JSON: conserva hasta 8 elementos y elimina campos metadata.
     - Strings demasiado largos: trunca a _MAX_TOOL_RESULT_CHARS.
     """
@@ -261,7 +322,7 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
     try:
         data = json.loads(raw)
         # Procesado específico para récords personales
-        if tool_name == "get_personal_records" and isinstance(data, list):
+        if tool_name in {"get_personal_records", "get_personal_record"} and isinstance(data, list):
             return _compact_personal_records(data)
         # Añadir campos normalizados útiles para análisis de actividades
         if tool_name == "get_activity" and isinstance(data, dict):
@@ -588,13 +649,133 @@ def _is_activity_in_last_48h(activity: dict, now: datetime | None = None) -> boo
     return (now_dt - act_date) <= timedelta(hours=48)
 
 
+def _pick_day_payload(payload: Any, target_date: str) -> dict | None:
+    """Intenta extraer el bloque de datos del día objetivo desde payloads heterogéneos."""
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, list):
+        # Priorizar coincidencia por fecha cuando exista.
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            day = str(item.get("date") or item.get("calendarDate") or "")
+            if day == target_date:
+                return item
+        for item in payload:
+            if isinstance(item, dict):
+                return item
+    return None
+
+
+def _format_body_battery_day(payload: Any, target_date: str) -> str:
+    """Formatea Body Battery con datos reales del día si están disponibles."""
+    day = _pick_day_payload(payload, target_date)
+    if not day:
+        return "sin datos"
+
+    level = (
+        day.get("body_battery_level")
+        or day.get("bodyBatteryLevel")
+        or day.get("bodyBatteryMostRecentValue")
+        or day.get("current")
+    )
+    highest = day.get("highestBodyBattery") or day.get("highest") or day.get("body_battery_highest")
+    lowest = day.get("lowestBodyBattery") or day.get("lowest") or day.get("body_battery_lowest")
+    charged = day.get("charged") or day.get("body_battery_charged")
+    drained = day.get("drained") or day.get("body_battery_drained")
+
+    parts: list[str] = []
+    if level is not None:
+        parts.append(f"nivel {int(level)}")
+    if highest is not None and lowest is not None:
+        parts.append(f"max {int(highest)}/min {int(lowest)}")
+    if charged is not None and drained is not None:
+        parts.append(f"+{int(charged)}/-{int(drained)}")
+
+    if parts:
+        return " · ".join(parts)
+    return "datos disponibles"
+
+
+def _format_hrv_day(payload: Any, target_date: str) -> str:
+    """Formatea HRV con métricas relevantes (ms) del día."""
+    day = _pick_day_payload(payload, target_date)
+    if not day:
+        return "sin datos"
+
+    avg = (
+        day.get("last_night_avg_hrv_ms")
+        or day.get("lastNightAvg")
+        or day.get("avgOvernightHrv")
+        or day.get("avgHrv")
+    )
+    weekly = day.get("weekly_avg_hrv_ms") or day.get("weeklyAvg")
+    status = day.get("status")
+
+    parts: list[str] = []
+    if avg is not None:
+        parts.append(f"{float(avg):.1f} ms")
+    if weekly is not None:
+        parts.append(f"7d {float(weekly):.1f} ms")
+    if status:
+        parts.append(str(status))
+
+    if parts:
+        return " · ".join(parts)
+    return "datos disponibles"
+
+
+def _format_sleep_day(payload: Any, target_date: str) -> str:
+    """Formatea sueño con horas y puntuación cuando exista."""
+    day = _pick_day_payload(payload, target_date)
+    if not day:
+        return "sin datos"
+
+    sleep_hours = day.get("sleep_hours")
+    sleep_seconds = day.get("sleep_seconds") or day.get("sleepTimeSeconds")
+    score = day.get("sleep_score") or day.get("sleepScore")
+
+    if sleep_hours is None and sleep_seconds is not None:
+        try:
+            sleep_hours = round(float(sleep_seconds) / 3600, 2)
+        except (TypeError, ValueError):
+            sleep_hours = None
+
+    parts: list[str] = []
+    if sleep_hours is not None:
+        parts.append(f"{float(sleep_hours):.2f} h")
+    if score is not None:
+        parts.append(f"score {int(score)}")
+
+    if parts:
+        return " · ".join(parts)
+    return "datos disponibles"
+
+
 def _build_proactive_status_markdown(snapshot: dict) -> str:
     """Genera un bloque Markdown con estado proactivo de últimas 48h."""
+    def _is_generic_ok_summary(text: str) -> bool:
+        lowered = (text or "").strip().lower()
+        return "hoy=ok" in lowered or "ayer=ok" in lowered or "hoy=no" in lowered or "ayer=no" in lowered
+
+    def _to_ddmmyyyy(value: str) -> str:
+        try:
+            return datetime.fromisoformat(value).strftime("%d/%m/%Y")
+        except Exception:
+            return value
+
     profile_changes = snapshot.get("profile_changes", []) or []
+    plan_assigned = bool(snapshot.get("plan_assigned", False))
+    plan_recommendation = str(snapshot.get("plan_recommendation") or "").strip()
     body_battery = snapshot.get("body_battery", {}) or {}
     hrv = snapshot.get("hrv", {}) or {}
     sleep = snapshot.get("sleep", {}) or {}
     trainings = snapshot.get("trainings", []) or []
+    dates = snapshot.get("dates", {}) or {}
+    today_iso = str(dates.get("today") or date.today().isoformat())
+    yesterday_iso = str(dates.get("yesterday") or (date.today() - timedelta(days=1)).isoformat())
+    today_display = _to_ddmmyyyy(today_iso)
+    yesterday_display = _to_ddmmyyyy(yesterday_iso)
 
     lines = [
         "## Estado Proactivo (ultimas 48h)",
@@ -606,9 +787,38 @@ def _build_proactive_status_markdown(snapshot: dict) -> str:
     else:
         lines.append("- Perfil Garmin sin cambios detectados")
 
-    lines.append("- Body Battery: " + (body_battery.get("summary") or "sin datos recientes"))
-    lines.append("- HRV: " + (hrv.get("summary") or "sin datos recientes"))
-    lines.append("- Sueno: " + (sleep.get("summary") or "sin datos recientes"))
+    lines.append(f"- Fechas analizadas: hoy={today_display} · ayer={yesterday_display}")
+
+    body_summary = body_battery.get("summary") or ""
+    if body_battery.get("today") is not None or body_battery.get("yesterday") is not None:
+        body_summary = (
+            f"hoy={_format_body_battery_day(body_battery.get('today'), today_iso)} · "
+            f"ayer={_format_body_battery_day(body_battery.get('yesterday'), yesterday_iso)}"
+        )
+    elif _is_generic_ok_summary(body_summary):
+        body_summary = "sin datos recientes"
+
+    hrv_summary = hrv.get("summary") or ""
+    if hrv.get("today") is not None or hrv.get("yesterday") is not None:
+        hrv_summary = (
+            f"hoy={_format_hrv_day(hrv.get('today'), today_iso)} · "
+            f"ayer={_format_hrv_day(hrv.get('yesterday'), yesterday_iso)}"
+        )
+    elif _is_generic_ok_summary(hrv_summary):
+        hrv_summary = "sin datos recientes"
+
+    sleep_summary = sleep.get("summary") or ""
+    if sleep.get("today") is not None or sleep.get("yesterday") is not None:
+        sleep_summary = (
+            f"hoy={_format_sleep_day(sleep.get('today'), today_iso)} · "
+            f"ayer={_format_sleep_day(sleep.get('yesterday'), yesterday_iso)}"
+        )
+    elif _is_generic_ok_summary(sleep_summary):
+        sleep_summary = "sin datos recientes"
+
+    lines.append("- Body Battery: " + (body_summary or "sin datos recientes"))
+    lines.append("- HRV: " + (hrv_summary or "sin datos recientes"))
+    lines.append("- Sueno: " + (sleep_summary or "sin datos recientes"))
 
     if trainings:
         lines.append("- Entrenamientos recientes:")
@@ -619,10 +829,18 @@ def _build_proactive_status_markdown(snapshot: dict) -> str:
     else:
         lines.append("- Entrenamientos recientes: no se encontraron en las ultimas 48h")
 
+    if plan_assigned:
+        initial_recommendation = (
+            plan_recommendation
+            or "Tienes un plan activo. ¿Quieres que adapte la sesion de hoy a ese plan?"
+        )
+    else:
+        initial_recommendation = "No tienes plan asignado. ¿Que quieres hacer hoy?"
+
     lines.extend([
         "",
         "### Recomendacion inicial",
-        "- Usa este estado como base para ajustar la sesion de hoy antes de pedir un plan detallado.",
+        f"- {initial_recommendation}",
     ])
     return "\n".join(lines)
 
@@ -655,6 +873,268 @@ def _is_planning_intent(user_message: str) -> bool:
     return any(marker in text for marker in planning_markers)
 
 
+def _is_plan_status_intent(user_message: str) -> bool:
+    """Detecta preguntas sobre si existe un plan activo o cuál es ese plan."""
+    text = (user_message or "").strip().lower()
+    if not text or "plan" not in text:
+        return False
+
+    # Peticiones de creación/planificación: no son consultas de estado.
+    creation_markers = [
+        "planifica", "planificación", "planificacion", "crear", "créame", "creame",
+        "hazme", "diseña", "disena", "prepara", "recomienda", "recomiendas",
+    ]
+    if any(marker in text for marker in creation_markers):
+        return False
+
+    status_markers = [
+        "tengo", "hay", "existe", "asignado", "asignada",
+        "mi plan", "ese plan", "cuál es", "cual es", "qué plan", "que plan",
+    ]
+    return any(marker in text for marker in status_markers)
+
+
+def _format_iso_date_es(value: Any) -> str:
+    """Convierte fechas ISO (YYYY-MM-DD o ISO datetime) a DD/MM/AAAA para usuario."""
+    if not value:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    # Caso ISO date/datetime común
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%d/%m/%Y")
+    except Exception:
+        pass
+    # Intento conservador con solo la parte de fecha
+    if len(text) >= 10:
+        try:
+            return date.fromisoformat(text[:10]).strftime("%d/%m/%Y")
+        except Exception:
+            return text
+    return text
+
+
+def _build_training_plan_status_markdown(profile: dict) -> str:
+    """Construye respuesta clara y coherente para consultas de estado de plan."""
+    plan = _get_active_training_plan(profile)
+    goals = (profile or {}).get("goals", {}) if isinstance(profile, dict) else {}
+
+    if not plan:
+        lines = [
+            "## 🧭 Resumen",
+            "No tienes plan asignado ahora mismo.",
+        ]
+        if _has_goal_in_profile(profile):
+            race = goals.get("target_race") or "objetivo definido"
+            race_date = _format_iso_date_es(goals.get("target_race_date")) or "fecha por definir"
+            target_time = goals.get("target_time") or "tiempo por definir"
+            weekly_hours = goals.get("weekly_training_hours") or "por definir"
+            lines.extend([
+                "",
+                "## 📌 Objetivo guardado",
+                f"- Evento: {race}",
+                f"- Fecha objetivo: {race_date}",
+                f"- Tiempo objetivo: {target_time}",
+                f"- Horas/semana: {weekly_hours}",
+            ])
+        lines.extend([
+            "",
+            "## ✅ Siguiente paso",
+            "Si quieres, te preparo un plan activo a partir de ese objetivo.",
+        ])
+        return "\n".join(lines)
+
+    title = str(plan.get("title") or plan.get("name") or "Plan activo").strip()
+    today_focus = str(plan.get("today_focus") or plan.get("today_session") or "").strip()
+    status = str(plan.get("status") or "active").strip()
+    race = plan.get("target_race") or goals.get("target_race") or "objetivo definido"
+    race_date = _format_iso_date_es(plan.get("target_race_date") or goals.get("target_race_date")) or "fecha por definir"
+
+    lines = [
+        "## 🧭 Resumen",
+        f"Sí, tienes un plan activo: {title}.",
+        "",
+        "## 📋 Detalle del plan",
+        f"- Estado: {status}",
+        f"- Objetivo: {race}",
+        f"- Fecha objetivo: {race_date}",
+    ]
+    if today_focus:
+        lines.append(f"- Sesión sugerida hoy: {today_focus}")
+    lines.extend([
+        "",
+        "## ✅ Siguiente paso",
+        "Si quieres, adapto la sesión de hoy según tu recuperación actual.",
+    ])
+    return "\n".join(lines)
+
+
+def _is_personal_records_intent(user_message: str) -> bool:
+    """Detecta intención de consultar récords personales de running."""
+    text = (user_message or "").strip().lower()
+    if not text:
+        return False
+    markers = [
+        "record personal",
+        "records personales",
+        "récord personal",
+        "mejores registros",
+        "personal records",
+        "pr de",
+        "mejores marcas",
+        "marcas personales",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _is_personal_records_followup_intent(user_message: str, history: list[dict]) -> bool:
+    """Detecta follow-up tipo "en qué distancias son esas marcas"."""
+    text = (user_message or "").strip().lower()
+    if not text:
+        return False
+
+    followup_markers = [
+        "esas marcas",
+        "que distancias",
+        "en que distancias",
+        "qué distancias",
+        "de que distancia",
+        "de qué distancia",
+    ]
+    if not any(marker in text for marker in followup_markers):
+        return False
+
+    recent_assistant = [
+        (msg.get("content") or "").lower()
+        for msg in (history or [])[-6:]
+        if msg.get("role") == "assistant"
+    ]
+    return any("mejores registros personales" in content for content in recent_assistant)
+
+
+def _detect_personal_records_sport_intent(user_message: str, history: list[dict] | None = None) -> str:
+    """Detecta el deporte objetivo para consulta de PRs: running o cycling."""
+    text = (user_message or "").strip().lower()
+    cycling_markers = ["ciclismo", "ciclista", "bici", "bike", "cycling"]
+    running_markers = ["running", "correr", "carrera", "marat", "10k", "5k"]
+
+    if any(marker in text for marker in cycling_markers):
+        return "cycling"
+    if any(marker in text for marker in running_markers):
+        return "running"
+
+    recent_assistant = [
+        (msg.get("content") or "").lower()
+        for msg in (history or [])[-6:]
+        if msg.get("role") == "assistant"
+    ]
+    if any("registros personales en ciclismo" in content for content in recent_assistant):
+        return "cycling"
+    if any("registros personales en running" in content for content in recent_assistant):
+        return "running"
+
+    return "running"
+
+
+def _is_no_access_reply(text: str) -> bool:
+    """Detecta respuestas genéricas de falta de acceso a datos."""
+    raw = (text or "").strip().lower()
+    if not raw:
+        return False
+    markers = [
+        "no tengo acceso",
+        "no dispongo de acceso",
+        "no puedo acceder",
+    ]
+    return any(marker in raw for marker in markers)
+
+
+def _build_personal_records_markdown(compact_records: str, preferred_sport: str = "running") -> str:
+    """Renderiza récords personales en markdown legible para el usuario."""
+    data = _try_parse_json(compact_records)
+    if not isinstance(data, list) or not data:
+        return "No encontré récords personales en Garmin Connect para este usuario."
+
+    rows: list[tuple[str, str, str]] = []
+    running_type_ids = {1, 2, 3, 4, 5, 6, 7}
+    cycling_type_ids = {8, 9, 11}
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        categoria = (
+            item.get("categoria")
+            or item.get("tipo")
+            or item.get("record_type")
+            or "Registro"
+        )
+        valor = (
+            item.get("valor")
+            or item.get("tiempo")
+            or item.get("distancia")
+            or item.get("elevacion")
+            or item.get("pasos")
+            or item.get("racha")
+            or item.get("value")
+            or "n/d"
+        )
+        type_id = item.get("type_id") if item.get("type_id") is not None else item.get("typeId")
+
+        deporte = str(item.get("deporte") or "").lower()
+        categoria_lower = str(categoria).lower()
+        if isinstance(type_id, int):
+            is_running = type_id in running_type_ids
+            is_cycling = type_id in cycling_type_ids
+        else:
+            is_running = (
+                "run" in deporte
+                or "carrera" in deporte
+                or "marathon" in categoria_lower
+                or "5k" in categoria_lower
+                or "10k" in categoria_lower
+                or "longest run" in categoria_lower
+            )
+            is_cycling = (
+                "cycl" in deporte
+                or "bike" in deporte
+                or "ride" in categoria_lower
+                or "cycling" in categoria_lower
+            )
+
+        sport = "running" if is_running else "cycling" if is_cycling else "other"
+        rows.append((str(categoria), str(valor), sport))
+
+    selected: list[tuple[str, str, str]]
+    if preferred_sport == "cycling":
+        selected = [r for r in rows if r[2] == "cycling"]
+    elif preferred_sport == "running":
+        selected = [r for r in rows if r[2] == "running"]
+    else:
+        selected = rows
+    selected = selected[:10]
+
+    if not selected:
+        if preferred_sport == "cycling":
+            return "No encontré récords personales de ciclismo en Garmin Connect para este usuario."
+        if preferred_sport == "running":
+            return "No encontré récords personales de running en Garmin Connect para este usuario."
+        return "No encontré récords personales en Garmin Connect para este usuario."
+
+    sport_label = "ciclismo" if preferred_sport == "cycling" else "running"
+
+    lines = [
+        f"## Tus mejores registros personales en {sport_label}",
+        "",
+        "| Distancia / récord | Marca |",
+        "|---|---|",
+    ]
+    for categoria, valor, _ in selected:
+        lines.append(f"| {categoria} | {valor} |")
+
+    return "\n".join(lines)
+
+
 def _has_goal_in_profile(profile: dict) -> bool:
     """Comprueba si el perfil ya contiene un objetivo útil para planificar."""
     goals = (profile or {}).get("goals", {})
@@ -664,6 +1144,31 @@ def _has_goal_in_profile(profile: dict) -> bool:
         or goals.get("target_time")
         or goals.get("weekly_training_hours")
     )
+
+
+def _get_active_training_plan(profile: dict) -> dict | None:
+    """Devuelve el plan activo del atleta, separado de goals/objetivo."""
+    plan = (profile or {}).get("training_plan")
+    if not isinstance(plan, dict):
+        return None
+
+    status = str(plan.get("status") or "").strip().lower()
+    active_flag = plan.get("active")
+    is_active = bool(active_flag) if isinstance(active_flag, bool) else status in {
+        "active", "assigned", "current", "in_progress"
+    }
+    if not is_active:
+        return None
+    return plan
+
+
+def _build_startup_plan_recommendation(plan: dict) -> str:
+    """Construye la recomendación inicial cuando existe plan activo."""
+    title = str(plan.get("title") or plan.get("name") or "plan activo").strip()
+    today_focus = str(plan.get("today_focus") or plan.get("today_session") or "").strip()
+    if today_focus:
+        return f"Tienes plan activo ({title}). Sesión sugerida hoy: {today_focus}. ¿Quieres que la ajuste con tu estado actual?"
+    return f"Tienes plan activo ({title}). ¿Quieres que adapte la sesión de hoy a ese plan?"
 
 
 def _build_goal_plan_fallback(profile: dict) -> str:
@@ -1094,7 +1599,12 @@ async def _build_recovery_fallback_snapshot(
     for tool_name in tools:
         for date_iso in dates_to_try:
             try:
-                raw = await call_tool(mcp_session, tool_name, {"date": date_iso})
+                args = (
+                    {"start_date": date_iso, "end_date": date_iso}
+                    if tool_name == "get_body_battery"
+                    else {"date": date_iso}
+                )
+                raw = await call_tool(mcp_session, tool_name, args)
             except Exception:
                 continue
 
@@ -1946,7 +2456,11 @@ class TrainerAgent:
         # --- get_body_composition (peso más reciente si get_user_profile no lo devolvió) ---
         if "weight_kg" not in result:
             try:
-                raw = await call_tool(self.mcp_session, "get_body_composition", {"date": today})
+                raw = await call_tool(
+                    self.mcp_session,
+                    "get_body_composition",
+                    {"start_date": today, "end_date": today},
+                )
                 data = json.loads(raw) if raw and raw.strip().startswith(("{", "[")) else {}
                 if isinstance(data, list) and data:
                     data = data[0]
@@ -1980,8 +2494,14 @@ class TrainerAgent:
             parsed = _try_parse_json(compact)
             return parsed if parsed is not None else compact
 
-        body_today = await _tool_json("get_body_battery", {"date": today_iso})
-        body_yday = await _tool_json("get_body_battery", {"date": yesterday_iso})
+        body_today = await _tool_json(
+            "get_body_battery",
+            {"start_date": today_iso, "end_date": today_iso},
+        )
+        body_yday = await _tool_json(
+            "get_body_battery",
+            {"start_date": yesterday_iso, "end_date": yesterday_iso},
+        )
         hrv_today = await _tool_json("get_hrv_data", {"date": today_iso})
         hrv_yday = await _tool_json("get_hrv_data", {"date": yesterday_iso})
         sleep_today = await _tool_json("get_sleep_summary", {"date": today_iso})
@@ -2003,17 +2523,18 @@ class TrainerAgent:
                 }
             )
 
-        body_summary = "sin datos"
-        if body_today or body_yday:
-            body_summary = f"hoy={'ok' if body_today else 'no'} · ayer={'ok' if body_yday else 'no'}"
-
-        hrv_summary = "sin datos"
-        if hrv_today or hrv_yday:
-            hrv_summary = f"hoy={'ok' if hrv_today else 'no'} · ayer={'ok' if hrv_yday else 'no'}"
-
-        sleep_summary = "sin datos"
-        if sleep_today or sleep_yday:
-            sleep_summary = f"hoy={'ok' if sleep_today else 'no'} · ayer={'ok' if sleep_yday else 'no'}"
+        body_summary = (
+            f"hoy={_format_body_battery_day(body_today, today_iso)} · "
+            f"ayer={_format_body_battery_day(body_yday, yesterday_iso)}"
+        )
+        hrv_summary = (
+            f"hoy={_format_hrv_day(hrv_today, today_iso)} · "
+            f"ayer={_format_hrv_day(hrv_yday, yesterday_iso)}"
+        )
+        sleep_summary = (
+            f"hoy={_format_sleep_day(sleep_today, today_iso)} · "
+            f"ayer={_format_sleep_day(sleep_yday, yesterday_iso)}"
+        )
 
         return {
             "window_hours": 48,
@@ -2028,6 +2549,10 @@ class TrainerAgent:
         """Construye el mensaje proactivo mostrado al arrancar la sesion."""
         snapshot = await self.collect_startup_snapshot_48h()
         snapshot["profile_changes"] = profile_changes or []
+        active_plan = _get_active_training_plan(self.user_profile)
+        snapshot["plan_assigned"] = bool(active_plan)
+        if active_plan:
+            snapshot["plan_recommendation"] = _build_startup_plan_recommendation(active_plan)
         return _build_proactive_status_markdown(snapshot)
 
     async def build_onboarding_mcp_enrichment(self) -> dict:
@@ -2149,6 +2674,49 @@ class TrainerAgent:
         Gestiona automáticamente las llamadas a herramientas de Garmin.
         """
         messages = self._build_messages(user_message)
+
+        # Ruta determinista para estado de plan: evita alucinaciones del LLM
+        # cuando la pregunta es "¿tengo plan?" o "¿cuál es mi plan?".
+        if _is_plan_status_intent(user_message):
+            assistant_reply = _build_training_plan_status_markdown(self.user_profile)
+            self.conversation_history.append({"role": "user", "content": user_message})
+            self.conversation_history.append({"role": "assistant", "content": assistant_reply})
+            _save_history_entry("user", user_message)
+            _save_history_entry("assistant", assistant_reply)
+            return assistant_reply
+
+        # Ruta directa para récords personales: evita respuestas de "sin acceso"
+        # y asegura que se entreguen distancia + marca desde la primera respuesta.
+        force_personal_records = (
+            _is_personal_records_intent(user_message)
+            or _is_personal_records_followup_intent(user_message, self.conversation_history)
+        )
+        if force_personal_records:
+            try:
+                available_tool_names = {
+                    (item.get("function") or {}).get("name")
+                    for item in (self.tools_schema or [])
+                    if isinstance(item, dict)
+                }
+                records_tool = None
+                if "get_personal_record" in available_tool_names:
+                    records_tool = "get_personal_record"
+                elif "get_personal_records" in available_tool_names:
+                    records_tool = "get_personal_records"
+
+                if records_tool:
+                    records_raw = await call_tool(self.mcp_session, records_tool, {})
+                    records_compact = _compact_tool_result(records_raw, records_tool)
+                    if records_compact and records_compact != "(sin datos)" and not _is_no_data_result(records_raw):
+                        records_sport = _detect_personal_records_sport_intent(user_message, self.conversation_history)
+                        assistant_reply = _build_personal_records_markdown(records_compact, preferred_sport=records_sport)
+                        self.conversation_history.append({"role": "user", "content": user_message})
+                        self.conversation_history.append({"role": "assistant", "content": assistant_reply})
+                        _save_history_entry("user", user_message)
+                        _save_history_entry("assistant", assistant_reply)
+                        return assistant_reply
+            except Exception:
+                pass
 
         # Pre-fetch proactivo: si el usuario menciona una fecha explícita,
         # resolver y cargar la actividad + contexto completo ANTES del bucle LLM.
@@ -2336,6 +2904,9 @@ class TrainerAgent:
 
                 for tool_call in message.tool_calls:
                     tool_name = tool_call.function.name
+                    # Compatibilidad: algunas guías/prompts antiguos usan plural.
+                    if tool_name == "get_personal_records":
+                        tool_name = "get_personal_record"
                     try:
                         arguments = json.loads(tool_call.function.arguments)
                     except json.JSONDecodeError:
@@ -2408,6 +2979,33 @@ class TrainerAgent:
             # Respuesta final del agente
             assistant_reply = message.content or ""
 
+            # Fallback para récords personales cuando el modelo responde
+            # con "sin acceso" pese a tener herramientas MCP activas.
+            if _is_no_access_reply(assistant_reply) and (
+                _is_personal_records_intent(user_message)
+                or _is_personal_records_followup_intent(user_message, self.conversation_history)
+            ):
+                try:
+                    available_tool_names = {
+                        (item.get("function") or {}).get("name")
+                        for item in (self.tools_schema or [])
+                        if isinstance(item, dict)
+                    }
+                    records_tool = None
+                    if "get_personal_record" in available_tool_names:
+                        records_tool = "get_personal_record"
+                    elif "get_personal_records" in available_tool_names:
+                        records_tool = "get_personal_records"
+
+                    if records_tool:
+                        records_raw = await call_tool(self.mcp_session, records_tool, {})
+                        records_compact = _compact_tool_result(records_raw, records_tool)
+                        if records_compact and records_compact != "(sin datos)" and not _is_no_data_result(records_raw):
+                            records_sport = _detect_personal_records_sport_intent(user_message, self.conversation_history)
+                            assistant_reply = _build_personal_records_markdown(records_compact, preferred_sport=records_sport)
+                except Exception:
+                    pass
+
             # Fallback anti-respuesta genérica: si ya existe objetivo en perfil,
             # devolver una planificación base en lugar de pedir contexto redundante.
             if (
@@ -2416,6 +3014,23 @@ class TrainerAgent:
                 and _has_goal_in_profile(self.user_profile)
             ):
                 assistant_reply = _build_goal_plan_fallback(self.user_profile)
+                # Persistir un plan activo mínimo para diferenciarlo del objetivo.
+                try:
+                    goals = (self.user_profile or {}).get("goals", {})
+                    target_race = goals.get("target_race") or "objetivo"
+                    target_date = goals.get("target_race_date") or "fecha por definir"
+                    self.user_profile["training_plan"] = {
+                        "active": True,
+                        "status": "active",
+                        "source": "agent_goal_fallback",
+                        "title": f"Plan hacia {target_race}",
+                        "target_race": target_race,
+                        "target_race_date": target_date,
+                        "created_at": date.today().isoformat(),
+                    }
+                    _save_user_profile(self.user_profile)
+                except Exception:
+                    pass
 
             # Guardar en historial de conversación
             self.conversation_history.append({"role": "user", "content": user_message})

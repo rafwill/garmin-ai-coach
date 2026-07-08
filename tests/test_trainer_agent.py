@@ -14,11 +14,14 @@ Cubre:
 import json
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent.trainer_agent import (
+    _build_training_plan_status_markdown,
+    _build_personal_records_markdown,
+    _build_startup_plan_recommendation,
     _build_activity_candidates_payload,
     _build_goal_plan_fallback,
     _build_athlete_knowledge_context,
@@ -30,8 +33,12 @@ from agent.trainer_agent import (
     _extract_activities_list,
     _extract_iso_date_from_text,
     _GeminiCompletions,
+    _get_active_training_plan,
     _has_goal_in_profile,
+    _detect_personal_records_sport_intent,
     _is_generic_needs_more_info_reply,
+    _is_personal_records_followup_intent,
+    _is_plan_status_intent,
     _is_planning_intent,
     _resolve_activity_id_from_query,
     _is_activity_in_last_48h,
@@ -39,6 +46,7 @@ from agent.trainer_agent import (
     _normalize_trend_date_range,
     _normalize_get_activity_args,
     _normalize_date_args,
+    _load_system_prompt,
     _load_athlete_knowledge_chunks,
     _resolve_kb_paths,
     _retrieve_athlete_knowledge,
@@ -136,6 +144,36 @@ class TestExtractIsoDateFromText:
         assert _extract_iso_date_from_text("02/07/2026") == "2026-07-02"
 
 
+class TestSystemPromptDateFormatRules:
+    def test_full_prompt_requires_global_spanish_date_format(self):
+        prompt = _load_system_prompt(compact=False)
+        assert "Formato de fecha obligatorio (España)" in prompt
+        assert "Regla global de fechas (OBLIGATORIA)" in prompt
+        assert "DD/MM/AAAA" in prompt
+        assert "YYYY-MM-DD" in prompt
+
+    def test_compact_prompt_requires_global_spanish_date_format(self):
+        prompt = _load_system_prompt(compact=True)
+        assert "Regla global de fechas (España)" in prompt
+        assert "DD/MM/AAAA" in prompt
+        assert "YYYY-MM-DD" in prompt
+
+
+class TestSystemPromptPlanStatusRules:
+    def test_full_prompt_includes_plan_status_intent_variants(self):
+        prompt = _load_system_prompt(compact=False)
+        assert "Consulta de estado del plan (OBLIGATORIO)" in prompt
+        assert "que plan llevo esta semana?" in prompt
+        assert "sigo con el plan?" in prompt
+        assert "goals" in prompt and "training_plan" in prompt
+
+    def test_compact_prompt_includes_plan_status_rules(self):
+        prompt = _load_system_prompt(compact=True)
+        assert "Estado del plan (OBLIGATORIO)" in prompt
+        assert "Nunca inferir plan activo desde `goals`" in prompt
+        assert "training_plan" in prompt
+
+
 # ─── _strip_garmin_object ─────────────────────────────────────────────────────
 
 class TestStripGarminObject:
@@ -228,6 +266,12 @@ class TestCompactToolResult:
         result = _compact_tool_result(json.dumps(data), tool_name="get_personal_records")
         assert "20:00" in result  # 1200 s = 20 min
         assert "5K"    in result
+
+    def test_personal_record_singular_dispatched(self):
+        data = [{"typeId": 3, "value": 1200.0, "activityName": "5K race", "activityType": "running"}]
+        result = _compact_tool_result(json.dumps(data), tool_name="get_personal_record")
+        assert "20:00" in result
+        assert "5K" in result
 
     def test_dict_json_stripped(self):
         data = {"activityId": "abc", "startTimeGMT": "2026-01-01T07:00:00", "distance": 10000}
@@ -344,6 +388,68 @@ class TestCompactPersonalRecords:
         data = [{"typeId": 12, "value": 25432, "activityName": "Day", "activityType": "steps"}]
         result = json.loads(_compact_personal_records(data))
         assert "pasos" in result[0]
+
+    def test_supports_snake_case_payload_shape(self):
+        data = [
+            {
+                "record_type": "Fastest 10K",
+                "type_id": 4,
+                "value": "35:53",
+                "raw_value": 2153.6,
+            }
+        ]
+        result = json.loads(_compact_personal_records(data))
+        assert result[0]["categoria"] == "10K"
+        assert result[0]["valor"] == "35:53"
+
+    def test_translates_unknown_record_type_to_spanish(self):
+        data = [
+            {
+                "record_type": "Longest Ride",
+                "value": "199.02 km",
+            }
+        ]
+        result = json.loads(_compact_personal_records(data))
+        assert result[0]["categoria"] == "Ciclismo más largo"
+
+
+class TestPersonalRecordsMarkdown:
+    def test_build_personal_records_markdown_shows_running_rows(self):
+        compact = json.dumps(
+            [
+                {"categoria": "5K", "valor": "17:48", "type_id": 3},
+                {"categoria": "Ciclismo más largo", "valor": "199.02 km", "type_id": 8},
+            ]
+        )
+        out = _build_personal_records_markdown(compact)
+        assert "mejores registros personales en running" in out.lower()
+        assert "| 5K | 17:48 |" in out
+        assert "Ciclismo más largo" not in out
+
+    def test_personal_records_followup_intent_true_with_context(self):
+        history = [{"role": "assistant", "content": "## Tus mejores registros personales en running"}]
+        assert _is_personal_records_followup_intent("En que distancias son esas marcas?", history)
+
+    def test_build_personal_records_markdown_cycling_does_not_return_running(self):
+        compact = json.dumps(
+            [
+                {"categoria": "5K", "valor": "17:48", "type_id": 3},
+                {"categoria": "Ciclismo más largo", "valor": "199.02 km", "type_id": 8},
+                {"categoria": "40K ciclismo", "valor": "54:42", "type_id": 11},
+            ]
+        )
+        out = _build_personal_records_markdown(compact, preferred_sport="cycling")
+        assert "registros personales en ciclismo" in out.lower()
+        assert "Ciclismo más largo" in out
+        assert "40K ciclismo" in out
+        assert "5K" not in out
+
+    def test_detect_personal_records_sport_intent_cycling(self):
+        assert _detect_personal_records_sport_intent("Y mis mejores marcas en ciclismo?", []) == "cycling"
+
+    def test_detect_personal_records_sport_intent_from_followup_context(self):
+        history = [{"role": "assistant", "content": "## Tus mejores registros personales en ciclismo"}]
+        assert _detect_personal_records_sport_intent("En que distancias son esas marcas?", history) == "cycling"
 
 
 # ─── _clean_schema_for_gemini ─────────────────────────────────────────────────
@@ -716,7 +822,11 @@ class TestRecoveryFallback:
     @pytest.mark.asyncio
     async def test_build_recovery_fallback_snapshot_returns_payload(self):
         async def _fake_call_tool(_session, tool_name, arguments):
-            if tool_name == "get_body_battery" and arguments.get("date") == "2026-07-03":
+            if (
+                tool_name == "get_body_battery"
+                and arguments.get("start_date") == "2026-07-03"
+                and arguments.get("end_date") == "2026-07-03"
+            ):
                 return '{"charged":72,"drained":28}'
             return "No data found"
 
@@ -731,7 +841,11 @@ class TestRecoveryFallback:
     @pytest.mark.asyncio
     async def test_build_recovery_fallback_snapshot_handles_plain_text(self):
         async def _fake_call_tool(_session, tool_name, arguments):
-            if tool_name == "get_body_battery" and arguments.get("date") == "2026-07-03":
+            if (
+                tool_name == "get_body_battery"
+                and arguments.get("start_date") == "2026-07-03"
+                and arguments.get("end_date") == "2026-07-03"
+            ):
                 return "Battery score: 58"
             return "No data found"
 
@@ -768,12 +882,27 @@ class TestStartupProactive:
         assert "Estado Proactivo" in out
         assert "Perfil Garmin actualizado" in out
         assert "Trail suave" in out
+        assert "No tienes plan asignado" in out
+
+    def test_build_proactive_status_markdown_shows_plan_recommendation_when_assigned(self):
+        payload = {
+            "plan_assigned": True,
+            "plan_recommendation": "Tienes un objetivo activo (10K). ¿Quieres que adapte la sesion de hoy a ese plan?",
+            "body_battery": {"summary": "sin datos"},
+            "hrv": {"summary": "sin datos"},
+            "sleep": {"summary": "sin datos"},
+            "trainings": [],
+        }
+        out = _build_proactive_status_markdown(payload)
+        assert "Tienes un objetivo activo (10K)" in out
 
     @pytest.mark.asyncio
     async def test_collect_startup_snapshot_48h_collects_metrics(self):
         from agent.trainer_agent import TrainerAgent
+        captured_calls: list[tuple[str, dict]] = []
 
         async def _fake_call_tool(_session, tool_name, _arguments):
+            captured_calls.append((tool_name, dict(_arguments or {})))
             if tool_name == "get_activities":
                 today = date.today().isoformat()
                 return json.dumps({
@@ -792,6 +921,27 @@ class TestStartupProactive:
         assert snapshot["window_hours"] == 48
         assert snapshot["body_battery"]["summary"].startswith("hoy=")
         assert snapshot["trainings"]
+        bb_calls = [args for name, args in captured_calls if name == "get_body_battery"]
+        assert len(bb_calls) == 2
+        assert all("start_date" in args and "end_date" in args for args in bb_calls)
+
+    @pytest.mark.asyncio
+    async def test_build_startup_status_markdown_uses_training_plan_not_goals(self):
+        from agent.trainer_agent import TrainerAgent
+
+        agent = object.__new__(TrainerAgent)
+        agent.mcp_session = MagicMock()
+        agent.user_profile = {
+            "goals": {
+                "target_race": "10K",
+                "target_race_date": "2026-11-22",
+            }
+        }
+
+        with patch.object(TrainerAgent, "collect_startup_snapshot_48h", return_value={"body_battery": {}, "hrv": {}, "sleep": {}, "trainings": []}):
+            out = await TrainerAgent.build_startup_status_markdown(agent)
+
+        assert "No tienes plan asignado" in out
 
 
 # ─── Fallback de planificacion y rangos trend ─────────────────────────────
@@ -824,9 +974,29 @@ class TestPlanningFallbackAndRanges:
     def test_planning_intent_detection_false_for_activity_analysis(self):
         assert not _is_planning_intent("Analiza mi entrenamiento del día 2 de julio de 2026")
 
+    def test_plan_status_intent_true_for_have_plan_question(self):
+        assert _is_plan_status_intent("Tengo algun plan asignado?")
+
+    def test_plan_status_intent_false_for_plan_creation_request(self):
+        assert not _is_plan_status_intent("Puedes planificarme la semana?")
+
     def test_has_goal_in_profile(self):
         profile = {"goals": {"target_race": "10k", "target_race_date": "2026-11-22"}}
         assert _has_goal_in_profile(profile)
+
+    def test_get_active_training_plan_requires_plan_entity(self):
+        profile = {"goals": {"target_race": "10k"}}
+        assert _get_active_training_plan(profile) is None
+
+    def test_get_active_training_plan_detects_active(self):
+        profile = {"training_plan": {"active": True, "title": "Plan 10K", "status": "active"}}
+        plan = _get_active_training_plan(profile)
+        assert plan is not None
+        assert plan["title"] == "Plan 10K"
+
+    def test_build_startup_plan_recommendation_includes_title(self):
+        msg = _build_startup_plan_recommendation({"title": "Plan 10K", "active": True})
+        assert "Plan 10K" in msg
 
     def test_build_goal_plan_fallback_contains_target(self):
         profile = {
@@ -840,3 +1010,62 @@ class TestPlanningFallbackAndRanges:
         out = _build_goal_plan_fallback(profile)
         assert "Zara Speed Run 10k" in out
         assert "Estructura semanal propuesta" in out
+
+    def test_build_training_plan_status_markdown_no_plan_is_explicit(self):
+        profile = {
+            "goals": {
+                "target_race": "Trail 42K",
+                "target_race_date": "2026-11-22",
+                "target_time": "05:30:00",
+                "weekly_training_hours": 10,
+            }
+        }
+        out = _build_training_plan_status_markdown(profile)
+        assert "No tienes plan asignado" in out
+        assert "22/11/2026" in out
+
+    def test_build_training_plan_status_markdown_active_plan_uses_plan_entity(self):
+        profile = {
+            "goals": {"target_race": "Trail 42K", "target_race_date": "2026-11-22"},
+            "training_plan": {
+                "active": True,
+                "status": "active",
+                "title": "Plan Trail 42K",
+                "target_race": "Trail 42K",
+                "target_race_date": "2026-11-22",
+                "today_focus": "Rodaje Z2 50 min",
+            },
+        }
+        out = _build_training_plan_status_markdown(profile)
+        assert "Sí, tienes un plan activo: Plan Trail 42K." in out
+        assert "22/11/2026" in out
+        assert "Rodaje Z2 50 min" in out
+
+
+class TestPlanStatusChatRoute:
+    @pytest.mark.asyncio
+    async def test_chat_plan_status_does_not_call_llm_and_is_consistent_with_profile(self):
+        from agent.trainer_agent import TrainerAgent
+
+        agent = object.__new__(TrainerAgent)
+        agent.user_profile = {
+            "goals": {
+                "target_race": "Trail 42K",
+                "target_race_date": "2026-11-22",
+                "weekly_training_hours": 10,
+            }
+        }
+        agent.conversation_history = []
+        agent.tools_schema = []
+        agent.mcp_session = MagicMock()
+        agent._build_messages = lambda _msg: []
+        agent.client = MagicMock()
+        agent.client.chat = MagicMock()
+        agent.client.chat.completions = MagicMock()
+        agent.client.chat.completions.create = AsyncMock(side_effect=AssertionError("LLM should not be called"))
+
+        with patch("agent.trainer_agent._save_history_entry"):
+            out = await TrainerAgent.chat(agent, "Tengo algun plan?")
+
+        assert "No tienes plan asignado" in out
+        assert len(agent.conversation_history) == 2
