@@ -31,6 +31,7 @@
 - Ruta determinista para estado del plan en chat: preguntas como "¿tengo plan?" y "¿cuál es ese plan?" se responden desde `training_plan` real sin depender de inferencia libre del LLM.
 - Prompting reforzado con variantes de intención para estado de plan y regla explícita: `goals` no implica plan activo.
 - Prompting reforzado para formato de fecha de salida en España (`DD/MM/AAAA`) y para respuestas completas en métricas de máximos/mínimos (valor + actividad + fecha).
+- Punto 10 cerrado: MCP en modo coach solo consulta. Política explícita en prompts y enforcement técnico en runtime con bloqueo de tools de escritura.
 
 ---
 
@@ -81,8 +82,11 @@ Seria necesario diferenciar en la base de datos una tabla para tokens y dentro d
 
 Seria necesario bajar a este proyecto el codigo del mcp para evitar posibles cambios y que algo no funcione en el futuro. Esto permitiría tener un control total sobre la versión del MCP que se está utilizando y evitar problemas de compatibilidad o cambios inesperados en la API que puedan afectar al funcionamiento del proyecto.
 
-### 10) prompting para dejar claro que el MCP es solo para consulta de datos y no para planificacion ni recomendaciones
-deberiamos dejar claro en el prompting que el acceso a las tools del MCP son para consultar y tener mejor información para que el agente pueda planificar y dar recomendaciones de la planificación del atleta. EL MCP se usa solo en modo consulta y en base a esos datos es el agente coach quien hace la planificación y da recomendaciones. El MCP no tiene capacidad de planificar ni de dar recomendaciones, solo proporciona datos para que el agente pueda hacerlo.
+### 10) [COMPLETADO] MCP solo consulta para coaching
+Implementado en prompts y en ejecución:
+- Prompts alineados: el MCP se usa para consulta de datos y el coach (LLM) hace planificación/recomendaciones.
+- Runtime endurecido: filtrado de tools de escritura en `initialize` y bloqueo en loop de tool-calls si llega una petición mutadora.
+- Cobertura de tests añadida para garantizar que no se ejecutan tools de escritura en modo read-only.
 
 
 ### 11) Planes de entrenamiento

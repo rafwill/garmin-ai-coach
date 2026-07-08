@@ -8,6 +8,10 @@ Uso recomendado:
 3. Llamar primero la tool prioritaria (o secuencia corta recomendada).
 4. Escalar a tools secundarias solo si falta contexto.
 
+Politica de seguridad (modo coach por defecto):
+- Este agente opera en modo solo consulta (read-only) para MCP.
+- Las secciones de escritura (crear/actualizar/borrar/programar/subir) se consideran modo admin/operativo y no deben ejecutarse en conversaciones normales de coaching.
+
 Notas de compatibilidad MCP (actual):
 - `get_personal_record` es el endpoint vigente para PRs (no `get_personal_records`).
 - `get_body_battery` requiere `start_date` y `end_date`.

@@ -20,6 +20,8 @@ import pytest
 
 from agent.trainer_agent import (
     _build_training_plan_status_markdown,
+    _build_tools_schema,
+    _build_mcp_read_only_block_message,
     _build_personal_records_markdown,
     _build_startup_plan_recommendation,
     _build_activity_candidates_payload,
@@ -40,6 +42,7 @@ from agent.trainer_agent import (
     _is_personal_records_followup_intent,
     _is_plan_status_intent,
     _is_planning_intent,
+    _is_write_mcp_tool,
     _resolve_activity_id_from_query,
     _is_activity_in_last_48h,
     _is_no_data_result,
@@ -1069,3 +1072,100 @@ class TestPlanStatusChatRoute:
 
         assert "No tienes plan asignado" in out
         assert len(agent.conversation_history) == 2
+
+
+class TestMcpReadOnlyPolicy:
+    def test_is_write_mcp_tool_detects_mutations(self):
+        assert _is_write_mcp_tool("create_custom_food")
+        assert _is_write_mcp_tool("update_custom_food")
+        assert _is_write_mcp_tool("delete_workout")
+        assert _is_write_mcp_tool("schedule_workout")
+        assert _is_write_mcp_tool("upload_workout")
+
+    def test_is_write_mcp_tool_allows_read_tools(self):
+        assert not _is_write_mcp_tool("get_activity")
+        assert not _is_write_mcp_tool("get_training_status")
+
+    def test_read_only_block_message_has_expected_shape(self):
+        payload = json.loads(_build_mcp_read_only_block_message("schedule_workout"))
+        assert payload["error"] == "mcp_read_only_mode"
+        assert payload["tool"] == "schedule_workout"
+
+    def test_build_tools_schema_can_be_filtered_for_read_only(self):
+        tools = [
+            {
+                "name": "get_activity",
+                "description": "read",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "create_run_workout",
+                "description": "write",
+                "input_schema": {"type": "object", "properties": {}},
+            },
+        ]
+        filtered = [t for t in tools if not _is_write_mcp_tool(t["name"])]
+        schema = _build_tools_schema(filtered)
+        names = {(item.get("function") or {}).get("name") for item in schema}
+        assert "get_activity" in names
+        assert "create_run_workout" not in names
+
+    @pytest.mark.asyncio
+    async def test_chat_blocks_write_tool_calls_in_read_only_mode(self):
+        from agent.trainer_agent import TrainerAgent
+
+        tool_call = MagicMock()
+        tool_call.id = "tc_1"
+        tool_call.function = MagicMock()
+        tool_call.function.name = "schedule_workout"
+        tool_call.function.arguments = "{}"
+
+        msg_with_tool = MagicMock()
+        msg_with_tool.tool_calls = [tool_call]
+        msg_with_tool.content = ""
+
+        msg_final = MagicMock()
+        msg_final.tool_calls = None
+        msg_final.content = "respuesta final"
+
+        choice1 = MagicMock()
+        choice1.message = msg_with_tool
+        choice1.finish_reason = "tool_calls"
+
+        choice2 = MagicMock()
+        choice2.message = msg_final
+        choice2.finish_reason = "stop"
+
+        response1 = MagicMock()
+        response1.choices = [choice1]
+        response1.usage = None
+
+        response2 = MagicMock()
+        response2.choices = [choice2]
+        response2.usage = None
+
+        agent = object.__new__(TrainerAgent)
+        agent.mcp_session = MagicMock()
+        agent.user_profile = {}
+        agent.conversation_history = []
+        agent.tools_schema = [{
+            "type": "function",
+            "function": {
+                "name": "schedule_workout",
+                "description": "write",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        }]
+        agent.mcp_read_only = True
+        agent.client = MagicMock()
+        agent.model = "test-model"
+        agent.client.chat = MagicMock()
+        agent.client.chat.completions = MagicMock()
+        agent.client.chat.completions.create = AsyncMock(side_effect=[response1, response2])
+        agent._build_messages = lambda _msg: []
+
+        with patch("agent.trainer_agent.call_tool", new=AsyncMock(side_effect=AssertionError("Should not call MCP write tools"))):
+            with patch("agent.trainer_agent._save_history_entry"):
+                out = await TrainerAgent.chat(agent, "Programa un entrenamiento para mañana")
+
+        assert out == "respuesta final"

@@ -110,6 +110,11 @@ Cuando el perfil incluya lesiones (tendinitis, fascitis, fracturas por estrés, 
 
 Antes de decidir que tools llamar, consulta primero `prompts/mcp_tool_routing_guide.md` para enrutar por intención y minimizar consumo de tokens. Usa ese documento como mapa operativo en tiempo de ejecución.
 
+Politica operativa MCP (modo coach):
+- Usa tools MCP solo para consulta/lectura de datos.
+- No uses tools de escritura (`create_`, `update_`, `delete_`, `schedule_`, `upload_`, `add_`, `set_`) para ejecutar cambios en Garmin Connect.
+- La planificacion y las recomendaciones las hace el coach (LLM) a partir de datos consultados.
+
 ## Perfil y composición corporal
 | Herramienta | Cuándo usarla |
 |---|---|

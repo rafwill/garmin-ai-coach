@@ -30,6 +30,12 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
   - Métricas avanzadas: HRV, VO2Max, predicciones de carrera, umbral de lactato, puntuación de resistencia, edad de fitness
   - Sueño, composición corporal, hidratación, perfil de usuario y objetivos
 
+* **🔒 Política MCP solo consulta (modo coach):**
+  - Por defecto, el agente opera con `MCP_READ_ONLY=true`.
+  - Las tools MCP de escritura se filtran y bloquean en runtime (`create_`, `update_`, `delete_`, `schedule_`, `upload_`, `add_`, `set_`).
+  - El MCP aporta datos; la planificación y recomendaciones las realiza el coach (LLM).
+  - Solo para mantenimiento/admin se puede desactivar con `MCP_READ_ONLY=false`.
+
 * **👤 Perfil de usuario sincronizado:**
   - Al arrancar, sincroniza automáticamente género, peso, altura y edad desde Garmin Connect.
   - Detecta y reporta cambios de perfil Garmin al inicio de sesión (si los hay).

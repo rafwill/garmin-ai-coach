@@ -124,6 +124,48 @@ _GARMIN_STRIP_FIELDS = {
     "displayName", "locationName", "countryCode", "timeZoneId",
 }
 
+_WRITE_TOOL_PREFIXES = (
+    "create_",
+    "update_",
+    "delete_",
+    "set_",
+    "schedule_",
+    "unschedule_",
+    "upload_",
+    "add_",
+)
+
+
+def _is_mcp_read_only_enabled() -> bool:
+    """Lee la política de solo lectura para tools MCP (por defecto activada)."""
+    raw = str(os.environ.get("MCP_READ_ONLY", "true")).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _is_write_mcp_tool(tool_name: str) -> bool:
+    """Detecta tools MCP de escritura para bloquearlas en modo read-only."""
+    name = str(tool_name or "").strip().lower()
+    if not name:
+        return False
+    if name == "request_reload":
+        return False
+    return name.startswith(_WRITE_TOOL_PREFIXES)
+
+
+def _build_mcp_read_only_block_message(tool_name: str) -> str:
+    """Mensaje estándar cuando se bloquea una tool de escritura."""
+    return json.dumps(
+        {
+            "error": "mcp_read_only_mode",
+            "tool": tool_name,
+            "message": (
+                "Esta sesión está en modo solo consulta: se bloquean herramientas de escritura "
+                "(create/update/delete/schedule/upload/add/set)."
+            ),
+        },
+        ensure_ascii=False,
+    )
+
 
 def _strip_garmin_object(obj):
     """Prueba y poda un objeto Garmin de forma recursiva para conservar métricas anidadas
@@ -2307,6 +2349,7 @@ class TrainerAgent:
         self.user_profile = _load_user_profile()
         self.conversation_history: list[dict] = []
         self.tools_schema: list[dict] = []
+        self.mcp_read_only = _is_mcp_read_only_enabled()
         self.knowledge_chunks, self.knowledge_sources = _load_athlete_knowledge_chunks(
             os.environ.get("ATHLETE_KB_PATHS", "")
         )
@@ -2386,6 +2429,11 @@ class TrainerAgent:
     async def initialize(self) -> None:
         """Carga las herramientas disponibles del MCP y restaura el historial reciente."""
         tools = await list_available_tools(self.mcp_session)
+        if self.mcp_read_only:
+            tools = [
+                tool for tool in tools
+                if not _is_write_mcp_tool((tool or {}).get("name", ""))
+            ]
         self.tools_schema = _build_tools_schema(tools)
 
         # Restaurar los últimos 6 mensajes del historial persistido
@@ -2941,6 +2989,16 @@ class TrainerAgent:
                                 if resolved_id is not None:
                                     arguments = {"activity_id": resolved_id}
                     arguments = _normalize_trend_date_range(tool_name, arguments)
+
+                    if self.mcp_read_only and _is_write_mcp_tool(tool_name):
+                        print(f"  [debug] Bloqueada tool de escritura por MCP_READ_ONLY: {tool_name}")
+                        raw_result = _build_mcp_read_only_block_message(tool_name)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": raw_result,
+                        })
+                        continue
 
                     print(f"  [debug] Ejecutando: {tool_name}({arguments})")
                     if tool_name == "get_activity" and not (isinstance(arguments, dict) and arguments.get("activity_id")):
