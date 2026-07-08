@@ -20,6 +20,7 @@ from agent.main import (
     _ensure_garmin_credentials,
     _format_coach_markdown,
     _is_first_time,
+    _parse_plan_command,
     _validate_date,
     _validate_hours,
     _validate_time,
@@ -217,6 +218,33 @@ class TestFormatCoachMarkdown:
         assert "- Readiness alta" in out
         assert "- Body Battery 82" in out
         assert "- Sueño sólido" in out
+
+
+class TestParsePlanCommand:
+    def test_default_help(self):
+        action, arg = _parse_plan_command("/plan")
+        assert action == "help"
+        assert arg is None
+
+    def test_parse_list(self):
+        action, arg = _parse_plan_command("/plan listar")
+        assert action == "list"
+        assert arg is None
+
+    def test_parse_view_with_id(self):
+        action, arg = _parse_plan_command("/plan ver plan-123")
+        assert action == "view"
+        assert arg == "plan-123"
+
+    def test_parse_activate_with_id(self):
+        action, arg = _parse_plan_command("/plan activar abc")
+        assert action == "activate"
+        assert arg == "abc"
+
+    def test_parse_create(self):
+        action, arg = _parse_plan_command("/plan crear")
+        assert action == "create"
+        assert arg is None
 
 
 # ─── _build_enriched_athlete_knowledge ─────────────────────────────────────

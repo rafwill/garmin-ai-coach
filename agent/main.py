@@ -37,6 +37,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.rule import Rule
+from rich.table import Table
 
 # Cargar variables de entorno desde .env
 load_dotenv(encoding="utf-8")
@@ -54,12 +55,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent.mcp_client import garmin_mcp_session
 from agent.trainer_agent import TrainerAgent, _load_user_profile, _save_user_profile
 from agent.storage import (
+    activate_training_plan,
     authenticate_app_user,
     check_supabase_connection,
+    create_training_plan,
     decrypt_password,
     encrypt_password,
     find_user_by_username,
     get_active_user,
+    get_training_plan,
+    list_training_plans,
+    list_training_plan_sessions,
     load_athlete_knowledge,
     register_app_user,
     save_athlete_knowledge,
@@ -534,6 +540,233 @@ def _show_profile() -> None:
     )
 
 
+def _parse_plan_command(cmd: str) -> tuple[str | None, str | None]:
+    """Parsea comandos /plan y devuelve (acción, argumento opcional)."""
+    raw = (cmd or "").strip().lower()
+    if not raw.startswith("/plan"):
+        return None, None
+
+    parts = raw.split()
+    if len(parts) == 1:
+        return "help", None
+
+    action = parts[1]
+    arg = " ".join(parts[2:]).strip() or None
+
+    if action in {"help", "ayuda", "?"}:
+        return "help", None
+    if action in {"listar", "list", "ls"}:
+        return "list", None
+    if action in {"ver", "view", "show"}:
+        return "view", arg
+    if action in {"activar", "activate"}:
+        return "activate", arg
+    if action in {"crear", "create", "new"}:
+        return "create", None
+    return "help", None
+
+
+def _show_plan_help() -> None:
+    console.print(Panel.fit(
+        "[bold]Comandos de planificación:[/]\n\n"
+        "  [bold cyan]/plan listar[/bold cyan]            Lista planes y marca el activo\n"
+        "  [bold cyan]/plan ver <plan_id>[/bold cyan]     Muestra detalle del plan y sus sesiones\n"
+        "  [bold cyan]/plan activar <plan_id>[/bold cyan] Activa un plan y desactiva el anterior\n"
+        "  [bold cyan]/plan crear[/bold cyan]             Crea un plan base en DB (interactivo)",
+        title="[bold blue]GarminCoach — Gestión de planes[/]",
+        border_style="blue",
+    ))
+
+
+def _show_training_plans() -> None:
+    try:
+        plans = list_training_plans(include_archived=False)
+    except Exception as exc:
+        console.print(f"[bold red]Error listando planes:[/] {exc}")
+        return
+
+    if not plans:
+        console.print("[yellow]No hay planes registrados para este usuario.[/]")
+        return
+
+    table = Table(title="Planes de entrenamiento")
+    table.add_column("Activo", justify="center")
+    table.add_column("ID")
+    table.add_column("Título")
+    table.add_column("Estado")
+    table.add_column("Duración")
+    table.add_column("Objetivo")
+
+    for plan in plans:
+        status = str(plan.get("status") or "").strip().lower()
+        is_active = status == "active"
+        plan_id = str(plan.get("id") or "")
+        title = str(plan.get("title") or "Plan").strip()
+        duration = str(plan.get("duration_weeks") or 0)
+        objective = str(plan.get("objective") or "—").strip() or "—"
+        table.add_row("✓" if is_active else "", plan_id, title, status or "—", f"{duration} sem", objective)
+
+    console.print(table)
+
+
+def _show_training_plan(plan_id: str) -> None:
+    if not plan_id:
+        console.print("[yellow]Uso: /plan ver <plan_id>[/]")
+        return
+
+    try:
+        plan = get_training_plan(plan_id)
+    except Exception as exc:
+        console.print(f"[bold red]Error cargando plan:[/] {exc}")
+        return
+
+    if not plan:
+        console.print(f"[yellow]No encontré el plan '{plan_id}'.[/]")
+        return
+
+    sessions = []
+    try:
+        sessions = list_training_plan_sessions(plan_id)
+    except Exception:
+        sessions = []
+
+    lines = [
+        f"[bold]ID:[/] {plan.get('id', '—')}",
+        f"[bold]Título:[/] {plan.get('title', '—')}",
+        f"[bold]Estado:[/] {plan.get('status', '—')}",
+        f"[bold]Objetivo:[/] {plan.get('objective', '—')}",
+        f"[bold]Dificultad:[/] {plan.get('difficulty', '—')}",
+        f"[bold]Duración:[/] {plan.get('duration_weeks', 0)} semanas",
+        f"[bold]Fuente:[/] {plan.get('source', '—')}",
+    ]
+
+    if sessions:
+        lines.append("")
+        lines.append("[bold]Sesiones:[/]")
+        for s in sessions[:14]:
+            lines.append(
+                f"- Semana {s.get('week_index', 1)} · Día {s.get('day_index', 1)} · "
+                f"{s.get('session_type', 'session')} · {s.get('duration_min') or 'n/d'} min · "
+                f"{s.get('intensity') or 'intensidad n/d'}"
+            )
+    else:
+        lines.append("")
+        lines.append("[dim]Sin sesiones registradas.[/]")
+
+    console.print(Panel("\n".join(lines), title="[bold blue]Detalle de plan[/]", border_style="blue"))
+
+
+def _activate_training_plan_cli(plan_id: str, agent: TrainerAgent) -> None:
+    if not plan_id:
+        console.print("[yellow]Uso: /plan activar <plan_id>[/]")
+        return
+
+    try:
+        activated = activate_training_plan(plan_id, change_reason="activated_from_cli")
+    except Exception as exc:
+        console.print(f"[bold red]Error activando plan:[/] {exc}")
+        return
+
+    if not activated:
+        console.print(f"[yellow]No se pudo activar el plan '{plan_id}'.[/]")
+        return
+
+    # Espejo backward-compatible en perfil local en memoria.
+    profile = _load_user_profile()
+    profile["training_plan"] = {
+        "id": activated.get("id"),
+        "title": activated.get("title"),
+        "status": "active",
+        "active": True,
+        "source": activated.get("source") or "db",
+    }
+    _save_user_profile(profile)
+    agent.user_profile = _load_user_profile()
+
+    console.print(f"[green]✓[/] Plan activado: [bold]{activated.get('title', plan_id)}[/]")
+
+
+def _create_training_plan_cli(agent: TrainerAgent) -> None:
+    profile = _load_user_profile()
+    goals = (profile or {}).get("goals", {})
+
+    console.print(Panel.fit(
+        "Crea una planificación base persistida en BD.\n"
+        "Puedes ajustar sesiones y detalles después.",
+        title="[bold blue]GarminCoach — Crear plan[/]",
+        border_style="blue",
+    ))
+
+    default_race = str(goals.get("target_race") or "")
+    default_weeks = "8"
+
+    title = Prompt.ask("Título del plan", default=(f"Plan hacia {default_race}" if default_race else "Plan personalizado")).strip()
+    objective = Prompt.ask("Objetivo principal", default=(default_race or "Mejora general")).strip()
+    description = Prompt.ask("Descripción breve", default="Plan base generado desde CLI").strip()
+    difficulty = Prompt.ask(
+        "Dificultad",
+        choices=["easy", "moderate", "hard"],
+        default="moderate",
+        show_choices=True,
+    ).strip()
+
+    while True:
+        duration_weeks_raw = Prompt.ask("Duración (semanas)", default=default_weeks).strip()
+        try:
+            duration_weeks = max(0, int(duration_weeks_raw))
+            break
+        except Exception:
+            console.print("[red]✗[/] Introduce un número entero de semanas.")
+
+    today_focus = Prompt.ask("Sesión sugerida para hoy (opcional)", default="").strip()
+
+    plan_data = {
+        "target_race": goals.get("target_race"),
+        "target_race_date": goals.get("target_race_date"),
+        "target_time": goals.get("target_time"),
+    }
+    if today_focus:
+        plan_data["today_focus"] = today_focus
+
+    try:
+        created = create_training_plan(
+            {
+                "title": title,
+                "description": description,
+                "objective": objective,
+                "difficulty": difficulty,
+                "duration_weeks": duration_weeks,
+                "status": "active",
+                "source": "cli_plan_create",
+                "plan_data": plan_data,
+            },
+            sessions=None,
+            change_reason="created_from_cli",
+        )
+    except Exception as exc:
+        console.print(f"[bold red]Error creando plan:[/] {exc}")
+        return
+
+    # Espejo backward-compatible en perfil local.
+    profile["training_plan"] = {
+        "id": created.get("id"),
+        "title": created.get("title"),
+        "status": "active",
+        "active": True,
+        "today_focus": today_focus,
+        "source": created.get("source") or "cli_plan_create",
+        "target_race": goals.get("target_race"),
+        "target_race_date": goals.get("target_race_date"),
+    }
+    _save_user_profile(profile)
+    agent.user_profile = _load_user_profile()
+
+    console.print(
+        f"[green]✓[/] Plan creado y activado: [bold]{created.get('title', 'Plan')}[/] "
+        f"([dim]{str(created.get('id') or '')[:8]}...[/])"
+    )
+
+
 def _show_help() -> None:
     """Muestra la ayuda del agente: ejemplos de preguntas, comandos y guía de indicadores."""
     console.print(Panel(
@@ -552,6 +785,10 @@ def _show_help() -> None:
         "  [bold cyan]/perfil editar objetivo[/bold cyan]  Cambiar deporte, carrera, tiempo meta\n"
         "  [bold cyan]/perfil editar salud[/bold cyan]     Cambiar lesiones y notas de salud\n"
         "  [bold cyan]/perfil editar[/bold cyan]           Editar todo el perfil\n"
+        "  [bold cyan]/plan listar[/bold cyan]             Ver planes de entrenamiento\n"
+        "  [bold cyan]/plan ver <id>[/bold cyan]           Ver detalle de un plan\n"
+        "  [bold cyan]/plan activar <id>[/bold cyan]       Activar plan por id\n"
+        "  [bold cyan]/plan crear[/bold cyan]              Crear y activar plan base\n"
         "  [bold cyan]/modelo[/bold cyan]                  Cambiar el proveedor de modelo de IA activo\n"
         "  [bold cyan]/ayuda[/bold cyan]                   Mostrar esta pantalla\n"
         "  [bold cyan]salir[/bold cyan]                    Terminar la sesión\n"
@@ -894,7 +1131,7 @@ async def main() -> None:
                 f"Te quedan {daily_info['remaining']:,} tokens hoy.[/]"
             )
 
-        console.print(Rule("[dim]Escribe tu pregunta · [bold]/perfil[/bold] · [bold]/modelo[/bold] · [bold]/perfil editar objetivo[/bold] · [bold]/perfil editar salud[/bold] · [bold]salir[/bold][/]"))
+        console.print(Rule("[dim]Escribe tu pregunta · [bold]/perfil[/bold] · [bold]/plan listar[/bold] · [bold]/plan crear[/bold] · [bold]/modelo[/bold] · [bold]salir[/bold][/]"))
 
         while True:
             try:
@@ -991,6 +1228,20 @@ async def main() -> None:
                 _save_user_profile(profile)
                 agent.user_profile = _load_user_profile()
                 console.print("[green]✓[/] Perfil actualizado.")
+                continue
+
+            if cmd.startswith("/plan"):
+                action, arg = _parse_plan_command(cmd)
+                if action == "list":
+                    _show_training_plans()
+                elif action == "view":
+                    _show_training_plan(arg or "")
+                elif action == "activate":
+                    _activate_training_plan_cli(arg or "", agent)
+                elif action == "create":
+                    _create_training_plan_cli(agent)
+                else:
+                    _show_plan_help()
                 continue
 
             if not user_input.strip():

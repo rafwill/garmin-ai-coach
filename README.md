@@ -257,6 +257,10 @@ A continuación se selecciona el modo de herramientas y el agente conecta con Ga
 | `/perfil editar` | Edita todos los campos del perfil |
 | `/perfil editar objetivo` | Edita solo los objetivos de entrenamiento |
 | `/perfil editar salud` | Edita solo los datos de salud |
+| `/plan listar` | Lista planes de entrenamiento y marca el activo |
+| `/plan ver <plan_id>` | Muestra detalle del plan y sus sesiones |
+| `/plan activar <plan_id>` | Activa un plan y desactiva el anterior |
+| `/plan crear` | Crea y activa un plan base persistido en Supabase |
 | `salir` | Guarda el resumen de sesión y cierra el agente |
 
 ### Ejemplos de preguntas
