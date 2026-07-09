@@ -1027,7 +1027,8 @@ _SPORT_MODEL_DEFAULTS: dict[str, dict] = {
         "tsb_abs_floor": -30.0,
     },
 }
-_SPORT_MODEL_DEFAULTS["triaton"] = _SPORT_MODEL_DEFAULTS["triatlón"]  # alias sin tilde
+_SPORT_MODEL_DEFAULTS["triaton"] = _SPORT_MODEL_DEFAULTS["triatlón"]   # alias: triatón sin tilde
+_SPORT_MODEL_DEFAULTS["triatlon"] = _SPORT_MODEL_DEFAULTS["triatlón"]  # alias: triatlon sin tilde (datos migrados)
 
 
 def _resolve_sport_model_cfg(profile: dict | None) -> dict:
@@ -4152,7 +4153,6 @@ class TrainerAgent:
                     or ("quota" in err_str.lower() and "rate" not in err_str.lower())
                 )
                 if is_quota_exhausted and getattr(self, "_api_key", None):
-                    from agent.storage import mark_gemini_quota_exhausted
                     mark_gemini_quota_exhausted(self._api_key)
                 
                 if "413" in err_str or "tokens_limit_reached" in err_str or "Request body too large" in err_str:
