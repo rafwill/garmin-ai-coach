@@ -20,7 +20,8 @@ Este archivo registra el tiempo invertido por dia en el proyecto.
 
 ### Al cerrar sesion
 1. Consultar el session store: `NOW - created_at` de la sesion actual = duracion real de la sesion de hoy.
-2. Actualizar la fila del dia de hoy con ese valor y fuente `session store (HH:MM - HH:MM)`.
+   - Convertir `created_at` (UTC) a hora local antes de calcular: `created_at + offset_local` (ej. UTC+2 en verano).
+2. Actualizar la fila del dia de hoy con ese valor y fuente `session store (HH:MM - HH:MM hora local)`.
 3. Recalcular y actualizar el **Total acumulado**.
 4. Hacer commit del BITACORA.md actualizado.
 
@@ -57,7 +58,7 @@ Este archivo registra el tiempo invertido por dia en el proyecto.
 | 06-07-2026 | 04:41 | sesion inicio->ultima actividad |
 | 07-07-2026 | 00:00 | sin sesiones registradas |
 | 08-07-2026 | 04:58 | sesion inicio->ultima actividad |
-| 09-07-2026 | 03:38 | session store (inicio 14:37 → ultimo commit 20:15 hora local) |
+| 09-07-2026 | 03:38 | session store (inicio 16:37 hora local → ultimo commit 20:15 hora local, UTC+2) |
 
 ## Total acumulado
 - 23:49
