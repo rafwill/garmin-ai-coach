@@ -56,7 +56,29 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
     - `memory/athlete_knowledge.txt`
     - `memory/athlete_knowledge.json`
 
-* **🚦 Estado proactivo al iniciar (48h):**
+* **� Cuantificación de carga y fatiga (TSS/ATL/CTL/TSB):**
+  - Al arrancar la sesión, el sistema calcula automáticamente el modelo de carga inspirado en TrainingPeaks:
+    - **TSS** (Training Stress Score): carga por sesión y acumulada diaria.
+    - **ATL** (fatiga aguda, ventana 7 días por defecto): cuánto estás acumulando a corto plazo.
+    - **CTL** (fitness crónico, ventana 42 días por defecto): tu nivel de forma construido en semanas/meses.
+    - **TSB** (forma = CTL − ATL): disponibilidad real para entrenar hoy.
+  - Los **tau** (constantes de tiempo) y **percentiles** se ajustan automáticamente al deporte principal del perfil:
+    | Deporte | ATL tau | CTL tau | Percentiles TSB/ATL |
+    |---------|--------:|--------:|---------------------|
+    | Running | 7 días | 42 días | estándar |
+    | Trail running | 8 días | 42 días | más amplios (sesiones largas) |
+    | Ciclismo | 7 días | 45 días | estándar |
+    | Triatlón | 7 días | 45 días | más amplios |
+  - Los parámetros se pueden **sobreescribir manualmente** en `profile.load_metrics.model`.
+  - Genera **rangos individualizados** por atleta usando percentiles de sus propios datos históricos (no umbrales genéricos).
+  - **Reglas de actuación automáticas** visibles en el estado proactivo:
+    - 🟠 Fatiga alta (TSB por debajo del rango individual) → reduce intensidad/volumen.
+    - 🟢 Buena disponibilidad (TSB en rango) → permite calidad o progresión controlada.
+    - 🔴 Sobrecarga sostenida → activa descarga y recomendaciones preventivas de lesión.
+  - La serie temporal completa (hasta 120 días) se persiste en el perfil del atleta en Supabase para análisis de tendencias.
+  - El bloque de carga/fatiga se incluye en el estado proactivo de arranque con resumen operativo (TSS·ATL·CTL·TSB·semana) y la regla aplicada.
+
+* **�🚦 Estado proactivo al iniciar (48h):**
   - Tras seleccionar modelo y conectar herramientas, muestra un briefing automático de últimas 48h.
   - Incluye estado de Body Battery, HRV, sueño y entrenamientos recientes.
   - Muestra fechas analizadas en formato `DD/MM/AAAA`.
@@ -265,6 +287,8 @@ A continuación se selecciona el modo de herramientas y el agente conecta con Ga
 | `/plan ver <plan_id>` | Muestra detalle del plan y sus sesiones |
 | `/plan activar <plan_id>` | Activa un plan y desactiva el anterior |
 | `/plan crear` | Crea y activa un plan base persistido en Supabase |
+| `/carga` | Tabla semanal de carga/fatiga (TSS · ATL · CTL · TSB) de las últimas 8 semanas |
+| `/carga meses` | Vista mensual de carga/fatiga de los últimos 3 meses |
 | `salir` | Guarda el resumen de sesión y cierra el agente |
 
 ### Ejemplos de preguntas
@@ -347,9 +371,130 @@ garmin-ai-coach/
 
 ---
 
+## ⚙️ Arquitectura de flujo interno
+
+Esta sección describe qué ocurre dentro del código en cada operación clave. Útil para entender cómo se generan los outputs y dónde actúa cada capa.
+
+### Arranque de sesión
+
+```
+main.py → asyncio.run(run_agent())
+  └─ TrainerAgent.initialize()
+       └─ list_available_tools(mcp_session)   → filtra tools de escritura si MCP_READ_ONLY=true
+  └─ TrainerAgent.build_startup_status_markdown()
+       └─ collect_startup_snapshot_48h()
+            ├─ call_tool("get_body_battery", start_date, end_date)
+            ├─ call_tool("get_hrv_data", date)
+            ├─ call_tool("get_sleep_summary", date)
+            ├─ call_tool("get_training_load_trend", 56 días)
+            ├─ call_tool("get_activities", limit=12)
+            └─ _compute_load_fatigue_metrics(activities, trend_payload, profile)
+                 └─ persiste en profile["load_metrics"] → _save_user_profile() → Supabase
+       └─ _build_proactive_status_markdown(snapshot)  → briefing visible al usuario
+```
+
+### Cálculo del modelo TSS/ATL/CTL/TSB
+
+```
+_compute_load_fatigue_metrics(activities, trend_payload, profile, days_window)
+  │
+  ├─ 1. Recopilación: _extract_training_load_points(trend_payload) + _estimate_session_tss(act)
+  ├─ 2. Config por deporte: _resolve_sport_model_cfg(profile)
+  │       └─ lee profile["goals"]["primary"] → _SPORT_MODEL_DEFAULTS[deporte]
+  │       └─ aplica overrides de profile["load_metrics"]["model"] si existen
+  ├─ 3. Semilla: profile["load_metrics"]["last"] → atl_prev, ctl_prev (continuidad)
+  ├─ 4. EWMA día a día:
+  │       atl = atl_prev + (tss - atl_prev) / tau_atl
+  │       ctl = ctl_prev + (tss - ctl_prev) / tau_ctl
+  │       tsb = ctl - atl
+  ├─ 5. Percentiles individualizados (últimos 28 días del propio atleta):
+  │       tsb_low = p15, tsb_high = p80, atl_high = p85
+  ├─ 6. Decisión de status (por prioridad):
+  │       abs_overload  → tsb <= tsb_abs_floor (suelo fijo por deporte)
+  │       sustained_overload → todos últimos 7 días TSB <= tsb_low
+  │       fatigue_high  → tsb < tsb_low OR atl > atl_high
+  │       ready         → tsb en rango AND not fatigue_high
+  │       neutral       → resto
+  └─ 7. Flag warm-up: days_with_load < 21 → aviso de calibración al usuario
+```
+
+### Cada mensaje en el chat
+
+```
+TrainerAgent.chat(user_message)
+  │
+  ├─ Ruta 1 — Plan status (determinista, sin LLM)
+  │    └─ _is_plan_status_intent(msg) → _build_training_plan_status_markdown(profile)
+  │         └─ _get_active_training_plan() → prioriza DB, fallback a profile
+  │
+  ├─ Ruta 2 — Planificación estructurada (determinista + LLM para texto)
+  │    └─ _is_planning_intent(msg) → _generate_structured_plan_payload(profile, msg)
+  │         ├─ Calcula duración, dificultad y razón del ajuste
+  │         ├─ Genera 7 sesiones base con duraciones proporcionales
+  │         └─ Si trail: _apply_trail_overrides() → tipos y notas específicos de trail
+  │
+  ├─ Ruta 3 — Récords personales (determinista)
+  │    └─ _is_personal_records_intent(msg) → call_tool("get_personal_record") → tabla
+  │
+  ├─ Ruta 4 — Análisis de actividad por fecha (pre-fetch)
+  │    └─ _extract_iso_date_from_text(msg) → _find_activity_id_by_date()
+  │         └─ Pre-carga: actividad + body battery + sueño + HRV + carga
+  │         └─ _build_activity_analysis_block() → bloque pre-computado para el LLM
+  │
+  └─ Ruta 5 — LLM con tool-calling (resto de intenciones)
+       └─ Bucle hasta 15 iteraciones:
+            ├─ LLM decide qué tools llamar
+            ├─ call_tool() → resultado → _compact_tool_result() → max 3000 chars
+            └─ Si tool de escritura y MCP_READ_ONLY → bloqueo inmediato
+```
+
+### Suelos absolutos de TSB por deporte
+
+| Deporte | TSB abs. floor | Motivo |
+|---------|---------------:|--------|
+| Trail running | −35 | Sesiones largas con picos de TSS muy altos |
+| Running | −30 | Volumen moderado, recuperación más rápida |
+| Ciclismo | −32 | Mayor volumen horario, fatiga muscular menor |
+| Triatlón | −35 | Multimodal, acumulación alta entre disciplinas |
+
+Cuando `TSB ≤ floor` el sistema fuerza `status=OVERLOAD` independientemente de los percentiles históricos del atleta, evitando que atletas crónicamente sobrecargados normalicen rangos peligrosos.
+
+### Training Load de Garmin vs. TSS de TrainingPeaks
+
+El sistema usa el **Training Load de Garmin como proxy de TSS**. Aquí la diferencia técnica entre ambos:
+
+**Training Load de Garmin** se basa en **EPOC** (Excess Post-exercise Oxygen Consumption):
+
+- Garmin estima dos umbrales por atleta: VT1 (aeróbico ligero→moderado) y VT2 (umbral de lactato), usando VO₂max e historial de FC.
+- A cada segundo de actividad le asigna un coste metabólico según la zona (por debajo de VT1, entre VT1-VT2, por encima de VT2).
+- Integra ese coste durante toda la sesión y lo normaliza en una escala empírica (~0 a 500).
+- Se recalibra automáticamente con cada actividad. No requiere configuración manual.
+
+**TSS de TrainingPeaks** (Coggan 2003) nació para ciclismo con potenciómetro:
+
+$$TSS = \frac{t \times NP \times IF}{FTP \times 3600} \times 100$$
+
+Una sesión en FTP durante exactamente 1 hora = **100 TSS**. Para running sin potenciómetro, TP usa hrTSS basado en la fórmula TRIMP de Banister (FC media vs. LTHR).
+
+**Comparativa:**
+
+| Aspecto | Garmin Training Load | TrainingPeaks TSS |
+|---------|----------------------|-------------------|
+| Fórmula base | EPOC integrado | Potencia normalizada o TRIMP-HR |
+| Calibración | Automática (VO₂max + historial) | Manual (FTP o LTHR del atleta) |
+| Exactitud | Alta con FC calibrada | Muy alta con potenciómetro |
+| Comparabilidad entre atletas | No (relativa al historial propio) | Sí (100 TSS = 1h en umbral) |
+| Deportes | Todos (running, trail, cycling, swimming) | Nació en ciclismo; adaptado a running/triatlón |
+
+**Por qué nuestro modelo es válido:** ATL/CTL/TSB son modelos relacionales, no absolutos. Lo que importa es que la unidad de carga sea **consistente para el mismo atleta**, no que sea exactamente 100 en umbral. La individualización está en los tau y percentiles propios de cada atleta, no en el valor absoluto de cada sesión.
+
+**Fallback cuando Garmin no tiene Training Load** (actividades antiguas o importadas): se usa una estimación por FC media aplicando el método Karvonen (%HRR → IF → TSS), similar a hrTSS pero sin requerir que el atleta conozca su LTHR.
+
+---
+
 ## 🧪 Tests
 
-El proyecto incluye una suite de **más de 100 tests unitarios** que cubre las funciones críticas sin necesidad de conexión a Garmin ni a ningún LLM.
+El proyecto incluye una suite de **más de 130 tests unitarios** que cubre las funciones críticas sin necesidad de conexión a Garmin ni a ningún LLM.
 
 ### Instalar dependencias de desarrollo
 ```powershell
@@ -365,7 +510,7 @@ pytest
 
 | Módulo | Qué cubre |
 |--------|-----------|
-| `trainer_agent.py` | `_seconds_to_hhmmss`, `_normalize_date_args`, `_strip_garmin_object`, `_compact_tool_result`, `_compact_personal_records`, `_clean_schema_for_gemini`, `_GeminiCompletions._parse`, resolución de actividad por fecha, zonas FC y análisis profundo, estado proactivo 48h, fallbacks de planificación |
+| `trainer_agent.py` | `_seconds_to_hhmmss`, `_normalize_date_args`, `_strip_garmin_object`, `_compact_tool_result`, `_compact_personal_records`, `_clean_schema_for_gemini`, `_GeminiCompletions._parse`, resolución de actividad por fecha, zonas FC y análisis profundo, estado proactivo 48h, fallbacks de planificación, modelo de carga/fatiga (TSS/ATL/CTL/TSB), configuración por deporte, tabla de tendencia `/carga` |
 | `main.py` | `_validate_date`, `_validate_time`, `_validate_hours`, `_is_first_time`, KB enriquecida de onboarding, `_ensure_garmin_credentials`, `_build_enriched_athlete_knowledge` |
 | `storage.py` | sanitización de credenciales, no-persistencia de passwords Garmin |
 

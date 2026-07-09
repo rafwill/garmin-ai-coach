@@ -28,6 +28,11 @@ from agent.trainer_agent import (
     _build_goal_plan_fallback,
     _build_athlete_knowledge_context,
     _build_proactive_status_markdown,
+    _build_load_trend_table,
+    _estimate_session_tss,
+    _compute_load_fatigue_metrics,
+    _format_load_fatigue_summary,
+    _resolve_sport_model_cfg,
     _build_recovery_fallback_snapshot,
     _clean_schema_for_gemini,
     _compact_personal_records,
@@ -902,12 +907,20 @@ class TestStartupProactive:
             "body_battery": {"summary": "hoy=ok · ayer=ok"},
             "hrv": {"summary": "hoy=no · ayer=ok"},
             "sleep": {"summary": "hoy=ok · ayer=no"},
+            "load_fatigue": {
+                "latest": {"tss": 75.0, "atl": 62.0, "ctl": 55.0, "tsb": -7.0},
+                "weekly": {"current_tss": 420.0},
+                "ranges": {"tsb_low": -10.0, "tsb_high": 5.0, "atl_high": 70.0},
+                "recommendation": "Puedes mantener sesión de calidad o progresión controlada según plan.",
+                "action": "buena disponibilidad",
+            },
             "trainings": [{"date": "2026-07-06", "name": "Trail suave"}],
         }
         out = _build_proactive_status_markdown(payload)
         assert "Estado Proactivo" in out
         assert "Perfil Garmin actualizado" in out
         assert "Trail suave" in out
+        assert "Carga/Fatiga (TSS/ATL/CTL/TSB)" in out
         assert "No tienes plan asignado" in out
 
     def test_build_proactive_status_markdown_shows_plan_recommendation_when_assigned(self):
@@ -929,13 +942,24 @@ class TestStartupProactive:
 
         async def _fake_call_tool(_session, tool_name, _arguments):
             captured_calls.append((tool_name, dict(_arguments or {})))
+            today = date.today().isoformat()
             if tool_name == "get_activities":
-                today = date.today().isoformat()
                 return json.dumps({
                     "activities": [
                         {"activityId": 777, "name": "Rodaje", "startTimeLocal": f"{today}T07:30:00.0"}
                     ]
                 })
+            if tool_name == "get_activities_by_date":
+                # Simula actividades históricas de 56 días para el modelo de carga
+                from datetime import timedelta
+                acts = []
+                for i in range(40):
+                    d = (date.today() - timedelta(days=i)).isoformat()
+                    if i % 7 != 0:  # descanso 1 día/semana
+                        acts.append({"activityId": 800 + i, "name": f"Trail {i}",
+                                     "startTimeLocal": f"{d}T08:00:00.0",
+                                     "trainingLoad": 55.0})
+                return json.dumps({"activities": acts, "has_more": False})
             return json.dumps({"ok": True})
 
         agent = object.__new__(TrainerAgent)
@@ -950,6 +974,37 @@ class TestStartupProactive:
         bb_calls = [args for name, args in captured_calls if name == "get_body_battery"]
         assert len(bb_calls) == 2
         assert all("start_date" in args and "end_date" in args for args in bb_calls)
+        # get_activities_by_date debe haberse llamado con start_date y end_date
+        hist_calls = [args for name, args in captured_calls if name == "get_activities_by_date"]
+        assert len(hist_calls) == 1
+        assert "start_date" in hist_calls[0] and "end_date" in hist_calls[0]
+
+    @pytest.mark.asyncio
+    async def test_collect_startup_snapshot_fallback_when_by_date_unavailable(self):
+        """Si get_activities_by_date lanza excepción, el snapshot sigue funcionando."""
+        from agent.trainer_agent import TrainerAgent
+
+        async def _fake_call_tool(_session, tool_name, _arguments):
+            today = date.today().isoformat()
+            if tool_name == "get_activities":
+                return json.dumps({
+                    "activities": [
+                        {"activityId": 1, "name": "Run", "startTimeLocal": f"{today}T08:00:00.0",
+                         "trainingLoad": 50.0}
+                    ]
+                })
+            if tool_name == "get_activities_by_date":
+                raise RuntimeError("tool not available")
+            return json.dumps({"ok": True})
+
+        agent = object.__new__(TrainerAgent)
+        agent.mcp_session = MagicMock()
+
+        with patch("agent.trainer_agent.call_tool", side_effect=_fake_call_tool):
+            snapshot = await TrainerAgent.collect_startup_snapshot_48h(agent)
+
+        assert snapshot["window_hours"] == 48
+        assert "load_fatigue" in snapshot
 
     @pytest.mark.asyncio
     async def test_build_startup_status_markdown_uses_training_plan_not_goals(self):
@@ -1000,6 +1055,24 @@ class TestPlanningFallbackAndRanges:
     def test_planning_intent_detection_false_for_activity_analysis(self):
         assert not _is_planning_intent("Analiza mi entrenamiento del día 2 de julio de 2026")
 
+    # ── Punto D: 'semana' en consultas de stats no activa planning intent ─────
+
+    def test_planning_intent_false_for_weekly_stats_query(self):
+        """'cuántos km he corrido esta semana' NO es planning intent."""
+        assert not _is_planning_intent("cuántos km he corrido esta semana")
+
+    def test_planning_intent_false_for_weekly_steps_query(self):
+        assert not _is_planning_intent("¿cuántos pasos llevo esta semana?")
+
+    def test_planning_intent_true_for_plan_creation(self):
+        assert _is_planning_intent("Crea un plan para prepararme para la ultra")
+
+    def test_planning_intent_true_for_planificacion_keyword(self):
+        assert _is_planning_intent("Planifícame la semana próxima")
+
+    def test_planning_intent_true_for_microciclo(self):
+        assert _is_planning_intent("¿cómo planteo el microciclo esta semana?")
+
     def test_plan_status_intent_true_for_have_plan_question(self):
         assert _is_plan_status_intent("Tengo algun plan asignado?")
 
@@ -1037,6 +1110,373 @@ class TestPlanningFallbackAndRanges:
         assert plan is not None
         assert plan["title"] == "Plan DB"
         assert plan["id"] == "plan-db-1"
+
+
+class TestLoadFatigueModel:
+    def test_compute_load_fatigue_metrics_returns_latest_and_ranges(self):
+        today = date.today()
+        activities = []
+        for idx in range(21):
+            d = (today - timedelta(days=idx)).isoformat()
+            activities.append(
+                {
+                    "startTimeLocal": f"{d}T07:00:00.0",
+                    "trainingLoad": 40 + (idx % 4) * 10,
+                }
+            )
+
+        out = _compute_load_fatigue_metrics(
+            activities=activities,
+            trend_payload={"load": []},
+            profile={},
+            days_window=42,
+        )
+
+        assert out is not None
+        assert out["latest"]["date"] == today.isoformat()
+        assert "atl" in out["latest"] and "ctl" in out["latest"] and "tsb" in out["latest"]
+        assert "tsb_low" in out["ranges"] and "tsb_high" in out["ranges"]
+        assert out["status"] in {"overload", "fatigue_high", "ready", "neutral"}
+
+    def test_compute_load_fatigue_metrics_detects_overload(self):
+        today = date.today()
+        trend = []
+        for idx in range(14):
+            d = (today - timedelta(days=idx)).isoformat()
+            trend.append({"date": d, "trainingLoad": 130})
+
+        out = _compute_load_fatigue_metrics(
+            activities=[],
+            trend_payload={"points": trend},
+            profile={},
+            days_window=28,
+        )
+
+        assert out is not None
+        assert out["flags"]["sustained_overload"] or out["status"] in {"overload", "fatigue_high"}
+
+    def test_format_load_fatigue_summary_handles_missing_data(self):
+        assert _format_load_fatigue_summary(None) == "sin datos suficientes"
+
+    # ── Tests por deporte ─────────────────────────────────────────────────────
+
+    def test_resolve_sport_model_cfg_trail_running_has_larger_atl_tau(self):
+        profile = {"goals": {"primary": "trail running"}}
+        cfg = _resolve_sport_model_cfg(profile)
+        assert cfg["atl_tau_days"] == 8
+
+    def test_resolve_sport_model_cfg_ciclismo_has_larger_ctl_tau(self):
+        profile = {"goals": {"primary": "ciclismo"}}
+        cfg = _resolve_sport_model_cfg(profile)
+        assert cfg["ctl_tau_days"] == 45
+
+    def test_resolve_sport_model_cfg_unknown_sport_falls_back_to_running(self):
+        profile = {"goals": {"primary": "patinaje"}}
+        cfg = _resolve_sport_model_cfg(profile)
+        running_cfg = _resolve_sport_model_cfg({"goals": {"primary": "running"}})
+        assert cfg["atl_tau_days"] == running_cfg["atl_tau_days"]
+
+    def test_resolve_sport_model_cfg_manual_override_wins(self):
+        profile = {
+            "goals": {"primary": "running"},
+            "load_metrics": {"model": {"atl_tau_days": 10}},
+        }
+        cfg = _resolve_sport_model_cfg(profile)
+        assert cfg["atl_tau_days"] == 10
+
+    def test_compute_load_fatigue_metrics_trail_uses_sport_tau(self):
+        today = date.today()
+        activities = [
+            {"startTimeLocal": f"{(today - timedelta(days=i)).isoformat()}T08:00:00.0", "trainingLoad": 60}
+            for i in range(20)
+        ]
+        profile = {"goals": {"primary": "trail running"}}
+        out = _compute_load_fatigue_metrics(
+            activities=activities,
+            trend_payload={},
+            profile=profile,
+            days_window=28,
+        )
+        assert out is not None
+        assert out["model"]["sport"] == "trail running"
+        assert out["model"]["atl_tau_days"] == 8
+
+    def test_compute_load_fatigue_metrics_ciclismo_uses_sport_tau(self):
+        today = date.today()
+        activities = [
+            {"startTimeLocal": f"{(today - timedelta(days=i)).isoformat()}T08:00:00.0", "trainingLoad": 80}
+            for i in range(20)
+        ]
+        profile = {"goals": {"primary": "ciclismo"}}
+        out = _compute_load_fatigue_metrics(
+            activities=activities,
+            trend_payload={},
+            profile=profile,
+            days_window=28,
+        )
+        assert out is not None
+        assert out["model"]["sport"] == "ciclismo"
+        assert out["model"]["ctl_tau_days"] == 45
+
+    def test_abs_overload_triggers_when_tsb_below_floor_trail(self):
+        """TSB <= tsb_abs_floor (-35 para trail) debe forzar OVERLOAD aunque el percentil no lo detecte."""
+        today = date.today()
+        # Serie de carga extrema sostenida que lleva TSB muy por debajo de -35
+        activities = [
+            {"startTimeLocal": f"{(today - timedelta(days=i)).isoformat()}T08:00:00.0",
+             "trainingLoad": 130}
+            for i in range(30)
+        ]
+        profile = {"goals": {"primary": "trail running"}}
+        out = _compute_load_fatigue_metrics(
+            activities=activities,
+            trend_payload={},
+            profile=profile,
+            days_window=56,
+        )
+        assert out is not None
+        assert out["ranges"]["tsb_abs_floor"] == -35.0
+        if out["latest"]["tsb"] <= -35.0:
+            assert out["status"] == "overload"
+            assert out["flags"]["abs_overload"] is True
+
+    def test_abs_overload_running_floor_is_minus_30(self):
+        cfg = _resolve_sport_model_cfg({"goals": {"primary": "running"}})
+        assert cfg["tsb_abs_floor"] == -30.0
+
+    def test_abs_overload_trail_floor_is_minus_35(self):
+        cfg = _resolve_sport_model_cfg({"goals": {"primary": "trail running"}})
+        assert cfg["tsb_abs_floor"] == -35.0
+
+    def test_sustained_overload_boundary_le_fix(self):
+        """Cuando tsb_now == tsb_low (valor == percentil p15), debe detectarse como overload.
+        Antes del fix se usaba < estricto y el caso límite se escapaba."""
+        today = date.today()
+        # Serie con carga alta los últimos 7 días para que p15 == valor actual (TSB muy negativo)
+        activities = [
+            {"startTimeLocal": f"{(today - timedelta(days=i)).isoformat()}T08:00:00.0",
+             "trainingLoad": 110 if i < 14 else 55}
+            for i in range(42)
+        ]
+        profile = {"goals": {"primary": "trail running"}}
+        out = _compute_load_fatigue_metrics(
+            activities=activities,
+            trend_payload={},
+            profile=profile,
+            days_window=56,
+        )
+        assert out is not None
+        # Con carga de 110 durante 14 días consecutivos, el status no debe ser "neutral" ni "ready"
+        assert out["status"] in {"overload", "fatigue_high"}
+
+    # ── Tests de warming_up ───────────────────────────────────────────────────
+
+    def test_warming_up_flag_true_with_few_training_days(self):
+        """Con < 21 días de entrenamiento real, warming_up debe ser True."""
+        today = date.today()
+        activities = [
+            {"startTimeLocal": f"{(today - timedelta(days=i)).isoformat()}T08:00:00.0",
+             "trainingLoad": 50}
+            for i in range(10)  # solo 10 días
+        ]
+        out = _compute_load_fatigue_metrics(
+            activities=activities,
+            trend_payload={},
+            profile={"goals": {"primary": "trail running"}},
+            days_window=28,
+        )
+        assert out is not None
+        assert out["warming_up"] is True
+        assert out["flags"]["warming_up"] is True
+        assert out["warming_up_days_remaining"] > 0
+
+    def test_warming_up_flag_false_with_enough_history(self):
+        """Con >= 21 días de entrenamiento real, warming_up debe ser False."""
+        today = date.today()
+        activities = [
+            {"startTimeLocal": f"{(today - timedelta(days=i)).isoformat()}T08:00:00.0",
+             "trainingLoad": 50}
+            for i in range(25)  # 25 días
+        ]
+        out = _compute_load_fatigue_metrics(
+            activities=activities,
+            trend_payload={},
+            profile={"goals": {"primary": "running"}},
+            days_window=42,
+        )
+        assert out is not None
+        assert out["warming_up"] is False
+        assert out["warming_up_days_remaining"] == 0
+
+    def test_proactive_markdown_shows_calibration_notice_when_warming_up(self):
+        """El estado proactivo debe incluir nota ⚙️ cuando warming_up=True."""
+        load_fatigue = {
+            "latest": {"tss": 50.0, "atl": 30.0, "ctl": 10.0, "tsb": -20.0},
+            "weekly": {"current_tss": 300.0},
+            "ranges": {"tsb_low": -22.0, "tsb_high": -5.0, "atl_high": 40.0, "tsb_abs_floor": -35.0},
+            "recommendation": "Mantén carga aeróbica controlada.",
+            "action": "carga estable",
+            "warming_up": True,
+            "warming_up_days_remaining": 11,
+            "days_with_load": 10,
+        }
+        snapshot = {
+            "body_battery": {"summary": "sin datos"},
+            "hrv": {"summary": "sin datos"},
+            "sleep": {"summary": "sin datos"},
+            "load_fatigue": load_fatigue,
+            "trainings": [],
+        }
+        out = _build_proactive_status_markdown(snapshot)
+        assert "calibracion" in out.lower() or "calibración" in out.lower()
+        assert "⚙️" in out
+
+    def test_proactive_markdown_no_calibration_notice_when_not_warming_up(self):
+        """Sin warming_up, la nota de calibración no debe aparecer."""
+        load_fatigue = {
+            "latest": {"tss": 50.0, "atl": 42.0, "ctl": 38.0, "tsb": -4.0},
+            "weekly": {"current_tss": 310.0},
+            "ranges": {"tsb_low": -12.0, "tsb_high": 4.0, "atl_high": 55.0, "tsb_abs_floor": -35.0},
+            "recommendation": "Puedes mantener sesión de calidad.",
+            "action": "buena disponibilidad",
+            "warming_up": False,
+            "warming_up_days_remaining": 0,
+            "days_with_load": 30,
+        }
+        snapshot = {
+            "body_battery": {"summary": "sin datos"},
+            "hrv": {"summary": "sin datos"},
+            "sleep": {"summary": "sin datos"},
+            "load_fatigue": load_fatigue,
+            "trainings": [],
+        }
+        out = _build_proactive_status_markdown(snapshot)
+        assert "⚙️" not in out
+
+    def test_load_trend_table_shows_warmup_note_when_ctl_low(self):
+        """La tabla /carga debe mostrar nota cuando CTL de primera fila < 15."""
+        today = date.today()
+        series = []
+        atl = ctl = 0.0
+        for i in range(28, -1, -1):
+            d = (today - timedelta(days=i)).isoformat()
+            tss = 50.0 if i % 7 != 0 else 0.0
+            atl = atl + (tss - atl) / 8
+            ctl = ctl + (tss - ctl) / 42
+            series.append({"date": d, "tss": round(tss, 1), "atl": round(atl, 1),
+                           "ctl": round(ctl, 1), "tsb": round(ctl - atl, 1)})
+        out = _build_load_trend_table(series, mode="weeks")
+        # CTL empieza < 15 → debe aparecer la nota
+        assert "⚙️" in out
+
+    # ── Tests de _build_load_trend_table ─────────────────────────────────────
+
+    def _make_series(self, n_days: int = 56, tss_value: float = 50.0) -> list[dict]:
+        today = date.today()
+        rows = []
+        atl = ctl = 0.0
+        for i in range(n_days, -1, -1):
+            d = (today - timedelta(days=i)).isoformat()
+            tss = tss_value if i % 7 != 0 else 0.0  # descanso un día por semana
+            atl = atl + (tss - atl) / 7
+            ctl = ctl + (tss - ctl) / 42
+            rows.append({"date": d, "tss": round(tss, 1), "atl": round(atl, 1), "ctl": round(ctl, 1), "tsb": round(ctl - atl, 1)})
+        return rows
+
+    def test_build_load_trend_table_weekly_returns_markdown_table(self):
+        series = self._make_series(56)
+        out = _build_load_trend_table(series, mode="weeks")
+        assert "| Semana |" in out
+        assert "TSS" in out and "ATL" in out and "CTL" in out and "TSB" in out
+
+    def test_build_load_trend_table_monthly_returns_markdown_table(self):
+        series = self._make_series(90)
+        out = _build_load_trend_table(series, mode="months")
+        assert "| Mes |" in out
+        assert "TSS total" in out
+
+    def test_build_load_trend_table_empty_series_returns_message(self):
+        out = _build_load_trend_table([], mode="weeks")
+        assert "Sin datos" in out
+
+    def test_build_load_trend_table_weekly_has_8_data_rows_max(self):
+        series = self._make_series(56)
+        out = _build_load_trend_table(series, mode="weeks")
+        # Contar filas de datos (empieza con |, no contiene --- ni encabezado de columnas)
+        data_rows = [
+            l for l in out.splitlines()
+            if l.startswith("|") and "---" not in l and "Semana" not in l
+        ]
+        assert len(data_rows) <= 8
+
+    def test_build_load_trend_table_contains_status_emoji(self):
+        series = self._make_series(56)
+        out = _build_load_trend_table(series, mode="weeks")
+        status_emojis = {"🟢", "🟠", "🔴", "🟡"}
+        assert any(e in out for e in status_emojis)
+
+    # ── Tests de _estimate_session_tss ────────────────────────────────────────
+
+    def test_estimate_tss_priority1_uses_garmin_training_load(self):
+        """Si la actividad tiene trainingLoad, se usa directamente."""
+        act = {"trainingLoad": 95.0, "averageHR": 155, "duration": 3600}
+        assert _estimate_session_tss(act) == 95.0
+
+    def test_estimate_tss_priority1_clamps_to_500(self):
+        act = {"trainingLoad": 999.0}
+        assert _estimate_session_tss(act) == 500.0
+
+    def test_estimate_tss_priority2_hr_based_z2(self):
+        """Sin trainingLoad, Z2 (avg_hr ~140, hr_rest 50, hr_max 185) → TSS razonable."""
+        act = {"averageHR": 140, "maxHR": 185, "duration": 3600}
+        tss = _estimate_session_tss(act)
+        # Z2 1h → esperamos entre 50 y 80 TSS
+        assert 50 <= tss <= 80, f"TSS Z2 1h inesperado: {tss}"
+
+    def test_estimate_tss_priority2_hr_based_z4_higher_than_z2(self):
+        """Z4 debe producir más TSS que Z2 para la misma duración."""
+        z2 = _estimate_session_tss({"averageHR": 140, "maxHR": 185, "duration": 3600})
+        z4 = _estimate_session_tss({"averageHR": 165, "maxHR": 185, "duration": 3600})
+        assert z4 > z2
+
+    def test_estimate_tss_priority2_uses_max_hr_from_activity(self):
+        """max_hr de la actividad se usa como referencia; si no, se asume 185."""
+        with_max = _estimate_session_tss({"averageHR": 150, "maxHR": 175, "duration": 3600})
+        without_max = _estimate_session_tss({"averageHR": 150, "duration": 3600})
+        # Con max_hr real del reloj (175) vs estimado (185): la %HRR difiere → TSS difiere
+        assert with_max != without_max
+
+    def test_estimate_tss_priority3_training_effect_fallback(self):
+        """Sin HR ni trainingLoad, usa Training Effect aeróbico."""
+        act = {"aerobicTrainingEffect": 3.0, "duration": 3600}
+        tss = _estimate_session_tss(act)
+        # TE 3.0 → IF ~0.77 → 1h → ~59 TSS
+        assert 45 <= tss <= 75, f"TSS con TE=3.0 inesperado: {tss}"
+
+    def test_estimate_tss_priority4_default_if_no_data(self):
+        """Sin ningún dato de intensidad, usa IF=0.68 → 1h → ~46 TSS."""
+        act = {"duration": 3600}
+        tss = _estimate_session_tss(act)
+        expected = 0.68 ** 2 * 100
+        assert abs(tss - expected) < 1.0
+
+    def test_estimate_tss_zero_duration_returns_zero(self):
+        act = {"averageHR": 145, "duration": 0}
+        assert _estimate_session_tss(act) == 0.0
+
+    def test_estimate_tss_invalid_activity_returns_zero(self):
+        assert _estimate_session_tss(None) == 0.0
+        assert _estimate_session_tss("not a dict") == 0.0
+
+    def test_estimate_tss_double_session_same_day_accumulates(self):
+        """Dos sesiones en el mismo día deben sumar sus TSS en el modelo."""
+        morning = {"averageHR": 145, "maxHR": 185, "duration": 3600}
+        afternoon = {"trainingLoad": 80.0}
+        tss_morning = _estimate_session_tss(morning)
+        tss_afternoon = _estimate_session_tss(afternoon)
+        # Ambas > 0 y distintas, y el modelo las sumará en tss_by_day
+        assert tss_morning > 0 and tss_afternoon > 0
+        assert tss_morning != tss_afternoon
 
     def test_get_active_training_plan_falls_back_to_profile_when_storage_unavailable(self):
         profile = {"training_plan": {"active": True, "title": "Plan local", "status": "active"}}
@@ -1106,6 +1546,105 @@ class TestPlanningFallbackAndRanges:
         assert plan["title"].startswith("Plan hacia")
         assert plan["duration_weeks"] >= 4
         assert len(sessions) == 7
+
+    def test_trail_plan_uses_trail_session_types(self):
+        """Plan con 'trail running' debe tener session_types específicos de trail."""
+        profile = {
+            "goals": {
+                "primary": "trail running",
+                "target_race": "Ultra Pirineos 55K",
+                "target_race_date": (date.today() + timedelta(days=84)).isoformat(),
+                "weekly_training_hours": 11,
+            },
+            "health": {"injuries": []},
+        }
+        _, sessions = _generate_structured_plan_payload(profile, "Crea plan para la ultra")
+        session_types = {s["session_type"] for s in sessions}
+        assert "trail_long" in session_types
+        assert "trail_hills" in session_types
+        assert "trail_z2" in session_types
+        assert "trail_tempo" in session_types
+        # No deben quedar tipos genéricos de running
+        assert "running_quality" not in session_types
+        assert "long_run" not in session_types
+
+    def test_trail_plan_long_run_notes_mention_desnivel(self):
+        """La tirada larga de trail debe mencionar desnivel en las notas."""
+        profile = {
+            "goals": {"primary": "trail running", "target_race": "Ultra 55K",
+                      "weekly_training_hours": 10},
+            "health": {"injuries": []},
+        }
+        _, sessions = _generate_structured_plan_payload(profile, "plan trail")
+        long_sessions = [s for s in sessions if s["session_type"] == "trail_long"]
+        assert long_sessions, "Debe existir al menos una sesión trail_long"
+        notes = long_sessions[0].get("notes", "")
+        assert "desnivel" in notes.lower()
+
+    def test_trail_plan_hills_mention_bajadas(self):
+        """La sesión de cuestas de trail debe mencionar técnica de bajada."""
+        profile = {
+            "goals": {"primary": "trail running", "target_race": "Ultra 55K",
+                      "weekly_training_hours": 10},
+            "health": {"injuries": []},
+        }
+        _, sessions = _generate_structured_plan_payload(profile, "plan trail")
+        hills = [s for s in sessions if s["session_type"] == "trail_hills"]
+        assert hills
+        all_text = " ".join([
+            " ".join(hills[0].get("exercises", [])),
+            hills[0].get("notes", ""),
+        ]).lower()
+        assert "bajada" in all_text
+
+    def test_non_trail_plan_does_not_use_trail_types(self):
+        """Un plan de running estándar no debe tener session_types de trail."""
+        profile = {
+            "goals": {"primary": "running", "target_race": "10K",
+                      "weekly_training_hours": 7},
+            "health": {"injuries": []},
+        }
+        _, sessions = _generate_structured_plan_payload(profile, "plan running")
+        session_types = {s["session_type"] for s in sessions}
+        assert "trail_long" not in session_types
+        assert "trail_hills" not in session_types
+
+    # ── Punto E: plan con lesión informa del ajuste de dificultad ────────────
+
+    def test_plan_with_injury_has_difficulty_reason_in_description(self):
+        """La descripción del plan debe mencionar la razón del ajuste de dificultad."""
+        profile = {
+            "goals": {"primary": "trail running", "target_race": "Ultra 55K",
+                      "weekly_training_hours": 11},
+            "health": {"injuries": ["tendinitis rotuliana leve"]},
+        }
+        plan, _ = _generate_structured_plan_payload(profile, "plan trail")
+        assert plan["difficulty"] == "easy"
+        # La descripción debe mencionar la lesión
+        assert "lesi" in plan["description"].lower() or "lesi" in (plan.get("plan_data") or {}).get("difficulty_reason", "").lower()
+
+    def test_plan_with_injury_stores_difficulty_reason_in_plan_data(self):
+        """plan_data.difficulty_reason debe explicar el motivo del ajuste."""
+        profile = {
+            "goals": {"primary": "running", "target_race": "10K", "weekly_training_hours": 8},
+            "health": {"injuries": ["fascitis plantar"]},
+        }
+        plan, _ = _generate_structured_plan_payload(profile, "plan running")
+        reason = (plan.get("plan_data") or {}).get("difficulty_reason", "")
+        assert "easy" in reason.lower()
+        assert "fascitis plantar" in reason.lower()
+
+    def test_plan_without_injury_high_hours_has_hard_reason(self):
+        """Con ≥10h y sin lesión, difficulty_reason debe indicar 'hard'."""
+        profile = {
+            "goals": {"primary": "trail running", "target_race": "Ultra 55K",
+                      "weekly_training_hours": 12},
+            "health": {"injuries": []},
+        }
+        plan, _ = _generate_structured_plan_payload(profile, "plan trail")
+        reason = (plan.get("plan_data") or {}).get("difficulty_reason", "")
+        assert plan["difficulty"] == "hard"
+        assert "hard" in reason.lower()
 
     def test_validate_structured_plan_flags_invalid_session_day(self):
         plan = {

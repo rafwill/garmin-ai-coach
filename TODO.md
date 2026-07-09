@@ -34,6 +34,8 @@
 - Prompting reforzado con variantes de intencion para estado de plan y regla explicita: goals no implica plan activo.
 - Prompting reforzado para formato de fecha de salida en Espana (DD/MM/AAAA) y para respuestas completas en metricas de maximos/minimos (valor + actividad + fecha).
 - Prompting reforzado con checklist MCP minimo por intencion para consultas operativas (estado diario, ajuste de sesion, planificacion/ajuste, dolor/sobrecarga y maximos/minimos).
+- Cuantificacion de carga y fatiga implementada (modelo tipo TrainingPeaks): calculo TSS diario/sesion, ATL (7d), CTL (42d) y TSB en runtime con reglas de actuacion por rango individual.
+- Persistencia en perfil del atleta de series temporales de carga/fatiga (hasta 120 dias), rangos individualizados y estado semanal para adaptar recomendaciones de forma continua.
 
 ### Puntos cerrados
 
@@ -90,23 +92,19 @@
 
 #### 9) Congelado del codigo MCP
 - Evaluar vendorizar/congelar el codigo MCP en el repo para evitar roturas por cambios upstream.
+- Analizar que tools usamos y cuales no para traernos al codigo solo las que necesitamos.
 
 #### 12) Naming del producto
 - Definir nombre final de la aplicacion.
 
-#### 13) Cuantificacion de carga y fatiga (TSS/ATL/TSB)
-- El agente debe cuantificar carga de entrenamiento y fatiga usando datos de rendimiento, historial de entrenamiento y estado fisico actual.
-- Incorporar un modelo inspirado en TrainingPeaks: TSS (carga), ATL (fatiga aguda), CTL (fitness) y TSB (forma/disponibilidad).
-- Calcular TSS por sesion y agregado diario/semanal para ajustar el plan de entrenamiento y prevenir sobrecarga.
-- Mantener ATL/CTL/TSB como series temporales para detectar tendencia de fatiga, picos de carga y periodos de riesgo.
-- Definir valores objetivo y rangos normales por atleta (perfil individual), no solo umbrales genericos.
-- Incluir reglas de actuacion en prompting segun rangos de TSS/ATL/TSB:
-- Si hay fatiga alta o TSB muy negativo -> reducir intensidad/volumen y priorizar recuperacion.
-- Si hay buena disponibilidad (TSB adecuado) -> permitir calidad o progresion controlada.
-- Si hay sobrecarga sostenida -> activar descarga y recomendaciones preventivas de lesion.
-- Identificar patrones de carga/fatiga a medio plazo y proponer ajustes de microciclo/mesociclo.
-- Dar feedback continuo al atleta sobre su estado de carga/fatiga y el por que de cada ajuste recomendado.
-- Adaptar recomendaciones en tiempo real cuando cambie el estado del atleta (sueno, HRV, estres, sensaciones, rendimiento).
+#### 13) [COMPLETADO] Cuantificacion de carga y fatiga (TSS/ATL/TSB)
+- Modelo implementado en runtime inspirado en TrainingPeaks: TSS por sesion/dia, ATL (7d), CTL (42d) y TSB.
+- Integrado en snapshot proactivo de arranque con resumen operativo y regla aplicada de actuacion.
+- Series temporales y rangos individualizados persistidos por atleta para detectar tendencia, picos y sobrecarga sostenida.
+- Prompting actualizado con reglas obligatorias de decision:
+	- fatiga alta/TSB bajo -> reducir carga y priorizar recuperacion.
+	- disponibilidad adecuada -> permitir calidad/progresion controlada.
+	- sobrecarga sostenida -> activar descarga y prevencion de lesion.
 
 ---
 
@@ -114,3 +112,9 @@
 - Mantener TODO sincronizado con decisiones de arquitectura reales.
 - Evitar registrar aqui tareas ya completadas salvo resumen corto de hitos.
 - Regla de equipo: documentar siempre los cambios antes de hacer commit.
+
+
+### 14) Añadir pasos de ejecución en README.md
+- Documentar pasos de ejecucion de la aplicacion en README.md.
+- Incluir instrucciones de instalacion, configuracion y uso basico.
+- Incluir instrucciones de ejecucion de tests y cobertura.

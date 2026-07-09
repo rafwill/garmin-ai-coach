@@ -767,6 +767,67 @@ def _create_training_plan_cli(agent: TrainerAgent) -> None:
     )
 
 
+def _show_load_trend_cli(agent: "TrainerAgent", cmd: str = "/carga") -> None:
+    """Muestra la tabla de tendencia de carga/fatiga (semanal o mensual)."""
+    from agent.trainer_agent import _build_load_trend_table
+
+    parts = cmd.strip().lower().split()
+    mode = "months" if len(parts) > 1 and parts[1] in {"meses", "mensual", "months", "month"} else "weeks"
+
+    load_metrics = (agent.user_profile or {}).get("load_metrics") or {}
+    series = load_metrics.get("series") or []
+
+    if not series:
+        console.print(Panel.fit(
+            "Aún no hay datos de carga/fatiga calculados.\n\n"
+            "Se calculan automáticamente al arrancar la sesión.\n"
+            "Reinicia el agente o realiza una consulta de estado para generarlos.",
+            title="[bold yellow]GarminCoach — Carga/Fatiga[/]",
+            border_style="yellow",
+        ))
+        return
+
+    md_table = _build_load_trend_table(series, mode=mode)
+
+    # Parsear la tabla Markdown y renderizarla con Rich Table para mejor visualización
+    lines = md_table.splitlines()
+    title_line = next((l.lstrip("# ").strip() for l in lines if l.startswith("#")), "Tendencia de carga")
+    table_lines = [l for l in lines if l.startswith("|") and "---" not in l]
+    legend_lines = [l.strip("_") for l in lines if l.startswith("_")]
+
+    if not table_lines:
+        console.print(Markdown(md_table))
+        return
+
+    headers = [h.strip() for h in table_lines[0].strip("|").split("|")]
+    rich_table = Table(title=title_line, border_style="blue")
+    for i, h in enumerate(headers):
+        justify = "right" if i > 0 and i < len(headers) - 1 else "left"
+        rich_table.add_column(h, justify=justify)
+
+    status_colors = {
+        "🟢": "green",
+        "🟠": "yellow",
+        "🔴": "red",
+        "🟡": "yellow",
+    }
+    for row_line in table_lines[1:]:
+        cells = [c.strip() for c in row_line.strip("|").split("|")]
+        # Colorear la columna de estado según emoji
+        colored = []
+        for i, cell in enumerate(cells):
+            if i == len(cells) - 1:
+                color = next((v for k, v in status_colors.items() if k in cell), None)
+                colored.append(f"[{color}]{cell}[/]" if color else cell)
+            else:
+                colored.append(cell)
+        rich_table.add_row(*colored)
+
+    console.print(rich_table)
+    if legend_lines:
+        console.print(f"[dim]{' · '.join(legend_lines)}[/]")
+
+
 def _show_help() -> None:
     """Muestra la ayuda del agente: ejemplos de preguntas, comandos y guía de indicadores."""
     console.print(Panel(
@@ -789,6 +850,8 @@ def _show_help() -> None:
         "  [bold cyan]/plan ver <id>[/bold cyan]           Ver detalle de un plan\n"
         "  [bold cyan]/plan activar <id>[/bold cyan]       Activar plan por id\n"
         "  [bold cyan]/plan crear[/bold cyan]              Crear y activar plan base\n"
+        "  [bold cyan]/carga[/bold cyan]                   Tabla semanal de carga/fatiga (TSS·ATL·CTL·TSB)\n"
+        "  [bold cyan]/carga meses[/bold cyan]             Vista mensual de carga/fatiga\n"
         "  [bold cyan]/modelo[/bold cyan]                  Cambiar el proveedor de modelo de IA activo\n"
         "  [bold cyan]/ayuda[/bold cyan]                   Mostrar esta pantalla\n"
         "  [bold cyan]salir[/bold cyan]                    Terminar la sesión\n"
@@ -1131,7 +1194,7 @@ async def main() -> None:
                 f"Te quedan {daily_info['remaining']:,} tokens hoy.[/]"
             )
 
-        console.print(Rule("[dim]Escribe tu pregunta · [bold]/perfil[/bold] · [bold]/plan listar[/bold] · [bold]/plan crear[/bold] · [bold]/modelo[/bold] · [bold]salir[/bold][/]"))
+        console.print(Rule("[dim]Escribe tu pregunta · [bold]/perfil[/bold] · [bold]/plan listar[/bold] · [bold]/plan crear[/bold] · [bold]/carga[/bold] · [bold]/modelo[/bold] · [bold]salir[/bold][/]"))
 
         while True:
             try:
@@ -1228,6 +1291,10 @@ async def main() -> None:
                 _save_user_profile(profile)
                 agent.user_profile = _load_user_profile()
                 console.print("[green]✓[/] Perfil actualizado.")
+                continue
+
+            if cmd.startswith("/carga"):
+                _show_load_trend_cli(agent, cmd)
                 continue
 
             if cmd.startswith("/plan"):

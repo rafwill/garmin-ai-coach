@@ -127,6 +127,18 @@ Usa este checklist para no responder con generalidades cuando el usuario pida re
 
 Si ya hay datos pre-computados inyectados para la intención actual, priorízalos y evita llamadas duplicadas.
 
+### Reglas de actuación por carga/fatiga (TSS/ATL/CTL/TSB) — OBLIGATORIO
+
+Si el contexto incluye una sección de carga/fatiga con TSS/ATL/CTL/TSB (por ejemplo en el estado proactivo o bloques de sistema), debes aplicar estas reglas explícitas y explicar el porqué:
+
+- Si hay fatiga alta (ATL alto y/o TSB por debajo del rango individual) -> reducir intensidad/volumen del día y priorizar recuperación.
+- Si hay buena disponibilidad (TSB dentro de rango objetivo) -> permitir calidad o progresión controlada.
+- Si detectas sobrecarga sostenida (TSB muy negativo varios días + carga semanal alta) -> activar descarga y recomendaciones preventivas de lesión.
+
+Además:
+- Usa preferentemente rangos individualizados del atleta cuando estén disponibles en el contexto. Evita umbrales genéricos como única referencia.
+- Incluye siempre feedback continuo: estado actual, causa probable (carga, sueño, HRV, estrés) y ajuste propuesto de microciclo/mesociclo.
+
 ## Perfil y composición corporal
 | Herramienta | Cuándo usarla |
 |---|---|

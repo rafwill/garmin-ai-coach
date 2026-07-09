@@ -794,6 +794,623 @@ def _format_sleep_day(payload: Any, target_date: str) -> str:
     return "datos disponibles"
 
 
+def _to_iso_date(value: Any) -> str | None:
+    """Normaliza una fecha heterogénea a ISO (YYYY-MM-DD)."""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    if "T" in text:
+        text = text.split("T", 1)[0]
+
+    try:
+        return date.fromisoformat(text).isoformat()
+    except Exception:
+        return None
+
+
+def _extract_training_load_points(payload: Any) -> list[dict]:
+    """Extrae puntos diarios de carga desde payloads de tendencia heterogéneos."""
+    points: list[dict] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                _walk(item)
+            return
+
+        if not isinstance(node, dict):
+            return
+
+        d_iso = _to_iso_date(
+            node.get("date")
+            or node.get("calendarDate")
+            or node.get("day")
+            or node.get("start_date")
+        )
+        load_value = (
+            node.get("trainingLoad")
+            or node.get("training_load")
+            or node.get("load")
+            or node.get("loadValue")
+            or node.get("dailyLoad")
+            or node.get("loadScore")
+        )
+
+        if d_iso and load_value is not None:
+            try:
+                load_float = max(0.0, float(load_value))
+                points.append({"date": d_iso, "tss": load_float})
+            except Exception:
+                pass
+
+        for value in node.values():
+            if isinstance(value, (list, dict)):
+                _walk(value)
+
+    _walk(payload)
+    return points
+
+
+def _estimate_session_tss(activity: dict) -> float:
+    """Estima TSS de una sesión con cuatro niveles de prioridad:
+
+    1. Training Load de Garmin  — más preciso (usa FC, potencia y cadencia del reloj).
+    2. FC media de la sesión    — estimación por método Karvonen (%HRR → IF → TSS).
+    3. Training Effect aeróbico — escala 0-5 mapeada a IF cuando no hay FC.
+    4. IF genérico 0.68         — último recurso si no hay ningún dato de intensidad.
+    """
+    if not isinstance(activity, dict):
+        return 0.0
+
+    # ── Prioridad 1: Training Load de Garmin ─────────────────────────────────
+    for key in (
+        "trainingLoad",
+        "training_load",
+        "load",
+        "loadValue",
+        "activityTrainingLoad",
+    ):
+        raw_load = activity.get(key)
+        if raw_load is None:
+            continue
+        try:
+            return max(0.0, min(float(raw_load), 500.0))
+        except Exception:
+            continue
+
+    # ── Duración — necesaria para todas las estimaciones restantes ────────────
+    duration_seconds = (
+        activity.get("duration")
+        or activity.get("durationInSeconds")
+        or activity.get("elapsedDuration")
+        or activity.get("movingDuration")
+        or 0
+    )
+    try:
+        hours = max(0.0, float(duration_seconds) / 3600.0)
+    except Exception:
+        hours = 0.0
+    if hours <= 0:
+        return 0.0
+
+    if_value: float | None = None
+
+    # ── Prioridad 2: estimación por FC media (método Karvonen %HRR) ──────────
+    # IF ≈ 0.40 + %HRR × 0.65  →  Z1(~45%HRR)≈0.69 · Z2(~65%)≈0.82 · Z4(~85%)≈0.95
+    avg_hr_raw = (
+        activity.get("averageHR")
+        or activity.get("avgHr")
+        or activity.get("avg_hr_bpm")
+        or activity.get("averageHeartRate")
+    )
+    max_hr_raw = (
+        activity.get("maxHR")
+        or activity.get("maxHr")
+        or activity.get("max_hr_bpm")
+        or activity.get("maxHeartRate")
+    )
+    if avg_hr_raw is not None:
+        try:
+            avg_hr  = float(avg_hr_raw)
+            hr_rest = 50.0                                        # RHR típico de atleta
+            hr_max  = float(max_hr_raw) if max_hr_raw else 185.0 # máx sesión o estimado
+            hr_max  = max(hr_max, avg_hr + 5.0)                  # máx > promedio siempre
+            hr_rest = min(hr_rest, avg_hr - 5.0)                 # reposo < promedio siempre
+
+            hrr = (avg_hr - hr_rest) / (hr_max - hr_rest)
+            hrr = max(0.30, min(1.00, hrr))
+
+            if_value = max(0.50, min(1.05, 0.40 + hrr * 0.65))
+        except Exception:
+            if_value = None
+
+    # ── Prioridad 3: Training Effect aeróbico de Garmin (escala 0–5) ─────────
+    if if_value is None:
+        effect = (
+            activity.get("activityTrainingEffect")
+            or activity.get("trainingEffect")
+            or activity.get("aerobicTrainingEffect")
+        )
+        if effect is not None:
+            try:
+                effect_norm = max(0.0, min(float(effect) / 5.0, 1.2))
+                if_value = max(0.50, min(1.05, 0.50 + (effect_norm * 0.45)))
+            except Exception:
+                if_value = None
+
+    # ── Prioridad 4: IF genérico (Z2 moderado) ───────────────────────────────
+    if if_value is None:
+        if_value = 0.68
+
+    tss = hours * (if_value ** 2) * 100.0
+    return max(0.0, min(tss, 500.0))
+
+
+def _percentile(values: list[float], pct: float, default: float = 0.0) -> float:
+    """Calcula un percentil simple sin dependencias externas."""
+    cleaned = sorted(float(v) for v in values if v is not None)
+    if not cleaned:
+        return float(default)
+    p = max(0.0, min(float(pct), 1.0))
+    idx = int(round((len(cleaned) - 1) * p))
+    return cleaned[idx]
+
+
+# ── Configuración de modelo de carga/fatiga por tipo de deporte ───────────────
+# Cada deporte tiene unos tau (constantes de tiempo) y percentiles distintos:
+#   - Trail running / ultrafondo: sesiones muy largas y TSS muy variable →
+#     ATL más largo (acumula fatiga lento) y percentiles más amplios.
+#   - Running de pista/carretera: volumen moderado, respuesta más ágil.
+#   - Ciclismo: mayor volumen horario, CTL más largo (el fitness tarda más).
+#   - Triatlón: multimodal, se asemeja al ciclismo en tau pero percentiles amplios.
+#   - Genérico (otro / desconocido): valores medios conservadores.
+#
+# Los valores pueden sobreescribirse con profile.load_metrics.model.
+_SPORT_MODEL_DEFAULTS: dict[str, dict] = {
+    "trail running": {
+        "atl_tau_days": 8,
+        "ctl_tau_days": 42,
+        "tsb_low_pct": 0.15,
+        "tsb_high_pct": 0.80,
+        "atl_high_pct": 0.85,
+        "weekly_target_pct": 0.55,
+        "weekly_high_pct": 0.90,
+        "tsb_abs_floor": -35.0,   # TSB ≤ esto → OVERLOAD obligatorio
+    },
+    "running": {
+        "atl_tau_days": 7,
+        "ctl_tau_days": 42,
+        "tsb_low_pct": 0.20,
+        "tsb_high_pct": 0.80,
+        "atl_high_pct": 0.80,
+        "weekly_target_pct": 0.55,
+        "weekly_high_pct": 0.85,
+        "tsb_abs_floor": -30.0,
+    },
+    "ciclismo": {
+        "atl_tau_days": 7,
+        "ctl_tau_days": 45,
+        "tsb_low_pct": 0.20,
+        "tsb_high_pct": 0.80,
+        "atl_high_pct": 0.80,
+        "weekly_target_pct": 0.55,
+        "weekly_high_pct": 0.85,
+        "tsb_abs_floor": -32.0,
+    },
+    "triatlón": {
+        "atl_tau_days": 7,
+        "ctl_tau_days": 45,
+        "tsb_low_pct": 0.15,
+        "tsb_high_pct": 0.80,
+        "atl_high_pct": 0.85,
+        "weekly_target_pct": 0.55,
+        "weekly_high_pct": 0.90,
+        "tsb_abs_floor": -35.0,
+    },
+    "otro": {
+        "atl_tau_days": 7,
+        "ctl_tau_days": 42,
+        "tsb_low_pct": 0.20,
+        "tsb_high_pct": 0.80,
+        "atl_high_pct": 0.80,
+        "weekly_target_pct": 0.55,
+        "weekly_high_pct": 0.85,
+        "tsb_abs_floor": -30.0,
+    },
+}
+_SPORT_MODEL_DEFAULTS["triaton"] = _SPORT_MODEL_DEFAULTS["triatlón"]  # alias sin tilde
+
+
+def _resolve_sport_model_cfg(profile: dict | None) -> dict:
+    """Devuelve la configuración base para el deporte principal del perfil,
+    aplicando después cualquier override manual que el usuario haya guardado
+    en profile.load_metrics.model."""
+    p = profile or {}
+    sport_raw = str((p.get("goals") or {}).get("primary") or "running").strip().lower()
+    base = dict(_SPORT_MODEL_DEFAULTS.get(sport_raw) or _SPORT_MODEL_DEFAULTS["running"])
+
+    saved_model = (p.get("load_metrics") or {}).get("model") or {}
+    for key in ("atl_tau_days", "ctl_tau_days", "tsb_low_pct", "tsb_high_pct",
+                "atl_high_pct", "weekly_target_pct", "weekly_high_pct"):
+        if key in saved_model:
+            try:
+                base[key] = float(saved_model[key])
+            except Exception:
+                pass
+
+    return base
+
+
+def _compute_load_fatigue_metrics(
+    activities: list[dict],
+    trend_payload: Any,
+    profile: dict | None = None,
+    days_window: int = 56,
+) -> dict | None:
+    """Calcula TSS/ATL/CTL/TSB y reglas de actuación con rangos individualizados por deporte."""
+    today = date.today()
+    start_day = today - timedelta(days=max(14, days_window - 1))
+
+    tss_by_day: dict[str, float] = {}
+
+    for item in _extract_training_load_points(trend_payload):
+        d_iso = item.get("date")
+        if not d_iso:
+            continue
+        try:
+            d_obj = date.fromisoformat(d_iso)
+        except Exception:
+            continue
+        if d_obj < start_day or d_obj > today:
+            continue
+        tss_by_day[d_iso] = max(tss_by_day.get(d_iso, 0.0), float(item.get("tss") or 0.0))
+
+    for act in list(activities or []):
+        if not isinstance(act, dict):
+            continue
+        d_iso = _to_iso_date(
+            act.get("startTimeLocal")
+            or act.get("startTimeGMT")
+            or act.get("date")
+            or act.get("calendarDate")
+        )
+        if not d_iso:
+            continue
+        try:
+            d_obj = date.fromisoformat(d_iso)
+        except Exception:
+            continue
+        if d_obj < start_day or d_obj > today:
+            continue
+        tss = _estimate_session_tss(act)
+        if tss > 0:
+            tss_by_day[d_iso] = tss_by_day.get(d_iso, 0.0) + tss
+
+    if not tss_by_day:
+        return None
+
+    # ── Configuración de tau y percentiles por deporte (con override por perfil) ──
+    model_cfg = _resolve_sport_model_cfg(profile)
+    tau_atl = int(round(float(model_cfg.get("atl_tau_days") or 7)))
+    tau_ctl = int(round(float(model_cfg.get("ctl_tau_days") or 42)))
+    tau_atl = max(3, min(tau_atl, 14))
+    tau_ctl = max(21, min(tau_ctl, 90))
+
+    sport_raw = str(((profile or {}).get("goals") or {}).get("primary") or "running").strip().lower()
+
+    saved_last = ((profile or {}).get("load_metrics") or {}).get("last") or {}
+    atl_prev = max(0.0, float(saved_last.get("atl") or 0.0))
+    ctl_prev = max(0.0, float(saved_last.get("ctl") or 0.0))
+    seed_date_iso = _to_iso_date(saved_last.get("date"))
+    if seed_date_iso:
+        try:
+            seed_date = date.fromisoformat(seed_date_iso)
+            if seed_date < start_day:
+                atl_prev = 0.0
+                ctl_prev = 0.0
+        except Exception:
+            pass
+
+    alpha_atl = 1.0 / float(tau_atl)
+    alpha_ctl = 1.0 / float(tau_ctl)
+
+    series: list[dict] = []
+    day_cursor = start_day
+    while day_cursor <= today:
+        d_iso = day_cursor.isoformat()
+        tss = max(0.0, float(tss_by_day.get(d_iso, 0.0)))
+        atl = atl_prev + (tss - atl_prev) * alpha_atl
+        ctl = ctl_prev + (tss - ctl_prev) * alpha_ctl
+        tsb = ctl - atl
+        row = {
+            "date": d_iso,
+            "tss": round(tss, 1),
+            "atl": round(atl, 1),
+            "ctl": round(ctl, 1),
+            "tsb": round(tsb, 1),
+        }
+        series.append(row)
+        atl_prev = atl
+        ctl_prev = ctl
+        day_cursor += timedelta(days=1)
+
+    latest = series[-1]
+    last_28 = series[-28:] if len(series) >= 28 else series[:]
+    last_42 = series[-42:] if len(series) >= 42 else series[:]
+    atl_values = [float(x["atl"]) for x in last_28]
+    tsb_values = [float(x["tsb"]) for x in last_28]
+
+    weekly_tss_values: list[float] = []
+    for idx in range(0, len(last_42), 7):
+        chunk = last_42[idx: idx + 7]
+        if chunk:
+            weekly_tss_values.append(round(sum(float(x["tss"]) for x in chunk), 1))
+    current_week_tss = round(sum(float(x["tss"]) for x in series[-7:]), 1)
+
+    tsb_low = round(_percentile(tsb_values, float(model_cfg.get("tsb_low_pct") or 0.20), default=-10.0), 1)
+    tsb_high = round(_percentile(tsb_values, float(model_cfg.get("tsb_high_pct") or 0.80), default=5.0), 1)
+    atl_high = round(_percentile(atl_values, float(model_cfg.get("atl_high_pct") or 0.80), default=max(50.0, float(latest["atl"]))), 1)
+    weekly_target = round(_percentile(weekly_tss_values, float(model_cfg.get("weekly_target_pct") or 0.55), default=current_week_tss), 1)
+    weekly_high = round(_percentile(weekly_tss_values, float(model_cfg.get("weekly_high_pct") or 0.85), default=max(current_week_tss, weekly_target * 1.15)), 1)
+
+    # ── Flag de calibración del modelo ────────────────────────────────────────
+    # El modelo EWMA arranca desde ATL=0/CTL=0 y necesita ~3 semanas de datos
+    # reales para que los percentiles sean fiables. Durante ese período los
+    # colores pueden ser más negativos de lo que corresponde a la carga real.
+    days_with_load = sum(1 for x in series if float(x.get("tss") or 0.0) > 0)
+    _MIN_DAYS_FOR_RELIABLE_RANGES = 21
+    warming_up = days_with_load < _MIN_DAYS_FOR_RELIABLE_RANGES
+    warming_up_days_remaining = max(0, _MIN_DAYS_FOR_RELIABLE_RANGES - days_with_load)
+
+    tsb_now = float(latest["tsb"])
+    atl_now = float(latest["atl"])
+    tsb_abs_floor = float(model_cfg.get("tsb_abs_floor") or -30.0)
+    # OVERLOAD absoluto: TSB por debajo del suelo del deporte, independientemente de percentiles.
+    # Cubre el caso donde el atleta es crónicamente sobreentrenado y sus percentiles
+    # se han adaptado a valores muy negativos (el p15 puede coincidir con el valor actual).
+    abs_overload = tsb_now <= tsb_abs_floor
+    # Bug fix: usar <= en lugar de < para cubrir el caso límite donde tsb_now == tsb_low
+    # (percentil p15 coincide exactamente con el valor actual del último día).
+    sustained_overload = len(series) >= 7 and all(float(x["tsb"]) <= tsb_low for x in series[-7:])
+    fatigue_high = (tsb_now < tsb_low) or (atl_now > atl_high)
+    available_for_quality = (tsb_now >= tsb_low) and (tsb_now <= max(tsb_high, tsb_low + 4.0)) and not fatigue_high
+
+    if abs_overload or sustained_overload or (current_week_tss > weekly_high and tsb_now < tsb_low):
+        status = "overload"
+        action = "sobrecarga sostenida"
+        recommendation = "Activa semana de descarga (−30% a −40% de volumen) y elimina calidad intensa 3-5 dias."
+    elif fatigue_high:
+        status = "fatigue_high"
+        action = "fatiga alta"
+        recommendation = "Reduce intensidad/volumen hoy y prioriza recuperación activa, sueño e hidratación."
+    elif available_for_quality:
+        status = "ready"
+        action = "buena disponibilidad"
+        recommendation = "Puedes mantener sesión de calidad o progresión controlada según plan."
+    else:
+        status = "neutral"
+        action = "carga estable"
+        recommendation = "Mantén carga aeróbica controlada y reevalúa mañana con HRV/sueño/estrés."
+
+    return {
+        "model": {
+            "name": "tp-inspired-ewma",
+            "sport": sport_raw,
+            "atl_tau_days": tau_atl,
+            "ctl_tau_days": tau_ctl,
+            "tsb_low_pct": model_cfg.get("tsb_low_pct") or 0.20,
+            "tsb_high_pct": model_cfg.get("tsb_high_pct") or 0.80,
+            "atl_high_pct": model_cfg.get("atl_high_pct") or 0.80,
+        },
+        "latest": latest,
+        "series": series[-120:],
+        "weekly": {
+            "current_tss": current_week_tss,
+            "target_tss": weekly_target,
+            "high_tss": weekly_high,
+        },
+        "ranges": {
+            "tsb_low": tsb_low,
+            "tsb_high": tsb_high,
+            "atl_high": atl_high,
+            "tsb_abs_floor": tsb_abs_floor,
+        },
+        "warming_up": warming_up,
+        "warming_up_days_remaining": warming_up_days_remaining,
+        "days_with_load": days_with_load,
+        "flags": {
+            "fatigue_high": fatigue_high,
+            "sustained_overload": sustained_overload,
+            "abs_overload": abs_overload,
+            "available_for_quality": available_for_quality,
+            "warming_up": warming_up,
+        },
+        "status": status,
+        "action": action,
+        "recommendation": recommendation,
+    }
+
+
+def _build_load_trend_table(series: list[dict], mode: str = "weeks") -> str:
+    """Genera una tabla Markdown con la tendencia de carga/fatiga.
+
+    Args:
+        series: lista de dicts con {date, tss, atl, ctl, tsb} ordenada por fecha asc.
+        mode: "weeks" (últimas 8 semanas) o "months" (últimos 3 meses).
+
+    Returns:
+        Tabla en Markdown con encabezado, filas por periodo y leyenda de estado.
+    """
+    if not series:
+        return "Sin datos de carga/fatiga disponibles. Inicia una sesión para que el sistema los calcule."
+
+    _STATUS_EMOJI = {
+        "overload": "🔴 sobrecarga",
+        "fatigue_high": "🟠 fatiga alta",
+        "ready": "🟢 disponible",
+        "neutral": "🟡 estable",
+    }
+
+    def _row_status(tsb: float, tsb_low: float = -10.0, tsb_high: float = 5.0, atl: float = 0.0, atl_high: float = 9999.0) -> str:
+        """Clasifica el estado de la fila según TSB/ATL."""
+        fatigue = tsb < tsb_low or atl > atl_high
+        available = not fatigue and (tsb_low <= tsb <= tsb_high)
+        if fatigue and tsb < tsb_low * 1.5:
+            return _STATUS_EMOJI["overload"]
+        if fatigue:
+            return _STATUS_EMOJI["fatigue_high"]
+        if available:
+            return _STATUS_EMOJI["ready"]
+        return _STATUS_EMOJI["neutral"]
+
+    def _fmt_date_range(start_iso: str, end_iso: str) -> str:
+        try:
+            s = datetime.fromisoformat(start_iso).strftime("%d/%m")
+            e = datetime.fromisoformat(end_iso).strftime("%d/%m")
+            return f"{s}–{e}"
+        except Exception:
+            return f"{start_iso}–{end_iso}"
+
+    def _fmt_month(iso: str) -> str:
+        _MONTHS_SHORT = {
+            "01": "Ene", "02": "Feb", "03": "Mar", "04": "Abr",
+            "05": "May", "06": "Jun", "07": "Jul", "08": "Ago",
+            "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dic",
+        }
+        parts = iso.split("-")
+        if len(parts) >= 2:
+            return f"{_MONTHS_SHORT.get(parts[1], parts[1])} {parts[0]}"
+        return iso
+
+    # Ordenar por fecha ascendente
+    sorted_series = sorted(series, key=lambda x: str(x.get("date") or ""))
+
+    if mode == "months":
+        # Agregar por mes calendario (últimos 3 meses)
+        buckets: dict[str, list[dict]] = {}
+        for row in sorted_series:
+            d_iso = str(row.get("date") or "")
+            month_key = d_iso[:7]  # YYYY-MM
+            buckets.setdefault(month_key, []).append(row)
+
+        month_keys = sorted(buckets)[-3:]
+        if not month_keys:
+            return "Sin datos suficientes para vista mensual."
+
+        header = (
+            "| Mes | TSS total | ATL fin | CTL fin | TSB fin | Estado |\n"
+            "|---|---:|---:|---:|---:|---|\n"
+        )
+        rows_md: list[str] = []
+        for mk in month_keys:
+            month_rows = buckets[mk]
+            tss_total = round(sum(float(r.get("tss") or 0.0) for r in month_rows), 1)
+            last = month_rows[-1]
+            atl = float(last.get("atl") or 0.0)
+            ctl = float(last.get("ctl") or 0.0)
+            tsb = float(last.get("tsb") or 0.0)
+            estado = _row_status(tsb, atl=atl)
+            rows_md.append(
+                f"| {_fmt_month(mk)} | {tss_total:.1f} | {atl:.1f} | {ctl:.1f} | {tsb:+.1f} | {estado} |"
+            )
+
+        return (
+            "## 📅 Tendencia de carga mensual (últimos 3 meses)\n\n"
+            + header
+            + "\n".join(rows_md)
+            + "\n\n"
+            + "_TSS: carga de sesión · ATL: fatiga aguda (7d) · CTL: fitness crónico · TSB: forma (CTL−ATL)_"
+        )
+
+    # Vista semanal: últimas 8 semanas
+    # Agrupamos en bloques de 7 días hacia atrás desde hoy
+    today = date.today()
+    weeks: list[tuple[str, str, list[dict]]] = []
+    for w in range(7, -1, -1):
+        end_d = today - timedelta(days=w * 7)
+        start_d = end_d - timedelta(days=6)
+        week_rows = [
+            r for r in sorted_series
+            if start_d.isoformat() <= str(r.get("date") or "") <= end_d.isoformat()
+        ]
+        weeks.append((start_d.isoformat(), end_d.isoformat(), week_rows))
+
+    # Descartar semanas vacías al principio
+    first_non_empty = next((i for i, (_, _, wr) in enumerate(weeks) if wr), 0)
+    weeks = weeks[first_non_empty:]
+    if not weeks:
+        return "Sin datos suficientes para vista semanal."
+
+    header = (
+        "| Semana | TSS | ATL | CTL | TSB | Estado |\n"
+        "|---|---:|---:|---:|---:|---|\n"
+    )
+    rows_md = []
+    for start_iso, end_iso, week_rows in weeks:
+        tss_sum = round(sum(float(r.get("tss") or 0.0) for r in week_rows), 1)
+        if week_rows:
+            last = week_rows[-1]
+            atl = float(last.get("atl") or 0.0)
+            ctl = float(last.get("ctl") or 0.0)
+            tsb = float(last.get("tsb") or 0.0)
+        else:
+            atl = ctl = tsb = 0.0
+        estado = _row_status(tsb, atl=atl)
+        rows_md.append(
+            f"| {_fmt_date_range(start_iso, end_iso)} | {tss_sum:.1f} | {atl:.1f} | {ctl:.1f} | {tsb:+.1f} | {estado} |"
+        )
+
+    # Nota de warm-up: si la primera semana con datos tiene CTL < 15, el modelo aún se está calibrando
+    first_ctl_values = [
+        float(r.get("ctl") or 0.0)
+        for (_, _, wr) in weeks
+        for r in wr
+        if float(r.get("ctl") or 0.0) > 0
+    ]
+    warmup_note = (
+        "\n_⚙️ Las primeras semanas reflejan el arranque del modelo (CTL bajo), no necesariamente una sobrecarga real._"
+        if first_ctl_values and first_ctl_values[0] < 15.0
+        else ""
+    )
+
+    return (
+        "## 📊 Tendencia de carga semanal (últimas 8 semanas)\n\n"
+        + header
+        + "\n".join(rows_md)
+        + "\n\n"
+        + "_TSS: carga de sesión · ATL: fatiga aguda · CTL: fitness crónico · TSB: forma (CTL−ATL)_\n"
+        + "_🟢 disponible = puedes calidad · 🟠 fatiga alta = reduce carga · 🔴 sobrecarga = descarga obligatoria_"
+        + warmup_note
+    )
+
+
+def _format_load_fatigue_summary(load_metrics: dict | None) -> str:
+    """Genera resumen textual corto para el bloque proactivo."""
+    if not isinstance(load_metrics, dict):
+        return "sin datos suficientes"
+    latest = load_metrics.get("latest") or {}
+    weekly = load_metrics.get("weekly") or {}
+    action = str(load_metrics.get("action") or "carga estable")
+    try:
+        return (
+            f"TSS hoy {float(latest.get('tss', 0.0)):.1f} · "
+            f"ATL {float(latest.get('atl', 0.0)):.1f} · "
+            f"CTL {float(latest.get('ctl', 0.0)):.1f} · "
+            f"TSB {float(latest.get('tsb', 0.0)):.1f} · "
+            f"Semana {float(weekly.get('current_tss', 0.0)):.1f} TSS ({action})"
+        )
+    except Exception:
+        return "sin datos suficientes"
+
+
 def _build_proactive_status_markdown(snapshot: dict) -> str:
     """Genera un bloque Markdown con estado proactivo de últimas 48h."""
     def _is_generic_ok_summary(text: str) -> bool:
@@ -812,6 +1429,7 @@ def _build_proactive_status_markdown(snapshot: dict) -> str:
     body_battery = snapshot.get("body_battery", {}) or {}
     hrv = snapshot.get("hrv", {}) or {}
     sleep = snapshot.get("sleep", {}) or {}
+    load_fatigue = snapshot.get("load_fatigue") or {}
     trainings = snapshot.get("trainings", []) or []
     dates = snapshot.get("dates", {}) or {}
     today_iso = str(dates.get("today") or date.today().isoformat())
@@ -861,6 +1479,31 @@ def _build_proactive_status_markdown(snapshot: dict) -> str:
     lines.append("- Body Battery: " + (body_summary or "sin datos recientes"))
     lines.append("- HRV: " + (hrv_summary or "sin datos recientes"))
     lines.append("- Sueno: " + (sleep_summary or "sin datos recientes"))
+    lines.append("- Carga/Fatiga (TSS/ATL/CTL/TSB): " + _format_load_fatigue_summary(load_fatigue))
+
+    if load_fatigue:
+        latest = load_fatigue.get("latest") or {}
+        ranges = load_fatigue.get("ranges") or {}
+        weekly = load_fatigue.get("weekly") or {}
+        recommendation = str(load_fatigue.get("recommendation") or "").strip()
+        if latest:
+            lines.append(
+                "  - Estado: "
+                f"TSB={float(latest.get('tsb', 0.0)):.1f} "
+                f"(objetivo {float(ranges.get('tsb_low', 0.0)):.1f}..{float(ranges.get('tsb_high', 0.0)):.1f}), "
+                f"ATL={float(latest.get('atl', 0.0)):.1f} "
+                f"(alto>{float(ranges.get('atl_high', 0.0)):.1f}), "
+                f"TSS semanal={float(weekly.get('current_tss', 0.0)):.1f}"
+            )
+        if recommendation:
+            lines.append(f"  - Regla aplicada: {recommendation}")
+        if load_fatigue.get("warming_up"):
+            days_rem = int(load_fatigue.get("warming_up_days_remaining") or 0)
+            weeks_rem = max(1, round(days_rem / 7))
+            lines.append(
+                f"  - ⚙️ Modelo en calibracion ({int(load_fatigue.get('days_with_load') or 0)} dias con datos). "
+                f"Los rangos seran fiables en ~{weeks_rem} semana{'s' if weeks_rem != 1 else ''} mas."
+            )
 
     if trainings:
         lines.append("- Entrenamientos recientes:")
@@ -907,12 +1550,21 @@ def _is_planning_intent(user_message: str) -> bool:
     text = (user_message or "").strip().lower()
     if not text:
         return False
+    # Palabras que indican CREAR o MODIFICAR un plan, no consultar stats.
+    # 'semana' y 'bloque' se eliminaron: son demasiado genéricas y
+    # provocan falsos positivos en consultas de estadisticas ('cuantos km esta semana').
     planning_markers = [
         "plan", "planifica", "planificación", "planificacion",
-        "objetivo", "preparar", "preparación", "preparacion",
-        "macro", "microciclo", "semana", "bloque",
+        "preparar", "preparación", "preparacion",
+        "macro", "microciclo",
     ]
-    return any(marker in text for marker in planning_markers)
+    if not any(marker in text for marker in planning_markers):
+        return False
+    # Guardia anti-falso-positivo: consultas de estado de objetivo no son planificación.
+    # 'objetivo' solo clasifica como planning si va acompañado de un verbo de acción.
+    if "objetivo" in text and not any(m in text for m in ("preparar", "planifica", "alcanzar", "lograr", "conseguir")):
+        return "plan" in text or any(m in text for m in ("macro", "microciclo", "preparaci"))
+    return True
 
 
 def _is_plan_status_intent(user_message: str) -> bool:
@@ -1308,6 +1960,104 @@ def _wants_new_plan_intent(user_message: str) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _apply_trail_overrides(sessions: list[dict], has_injuries: bool) -> list[dict]:
+    """Enriquece las sesiones con tipos y notas específicos de trail running.
+
+    Modifica en los dicts existentes: session_type, exercises y notes según el rol
+    de cada sesión en la semana. No altera duraciones ni intensidades.
+    """
+    quality_intensity_note = "(RPE conservado por lesión)" if has_injuries else ""
+
+    for s in sessions:
+        day = s.get("day_index", 0)
+        stype = str(s.get("session_type") or "").lower()
+
+        if stype == "strength":
+            s["session_type"] = "strength_trail"
+            s["exercises"] = [
+                "fuerza excéntrica cuádriceps (sentadillas búlgaras)",
+                "isométricos de sóleo y gemelo",
+                "hip thrust + trabajo glúteo medio",
+                "core antirotacional",
+                "movilidad cadera/tobillo",
+            ]
+            s["notes"] = (
+                "Calentamiento 10'. Enfoque en tren inferior para subida/bajada de trail. "
+                "Enfriamiento 5' con estiramientos fascia plantar y sóleo. "
+                "Hidratación 500 ml. Sin impacto en rodilla si lesión activa."
+            )
+
+        elif stype == "running_quality" and day in (2, 4):
+            if day == 2:
+                s["session_type"] = "trail_hills"
+                s["exercises"] = [
+                    "cuestas largas 4-6x3-4 min Z4",
+                    "bajadas técnicas controladas Z2 (no frenar con el talón)",
+                    "técnica de subida con bastones si aplica",
+                ]
+                s["notes"] = (
+                    f"Calentamiento 15' en llano/pendiente suave. "
+                    f"Cuestas con desnivel 6-10%. Bajadas controlando impacto. "
+                    f"Enfriamiento 10'. {quality_intensity_note} "
+                    f"Nutrición pre-sesión. Hidratación 600-800 ml."
+                )
+            else:
+                s["session_type"] = "trail_tempo"
+                s["exercises"] = [
+                    "tempo continuo Z3-Z4 en terreno variado",
+                    "secciones de terreno técnico a ritmo controlado",
+                    "economía de carrera en bajada",
+                ]
+                s["notes"] = (
+                    f"Calentamiento 15'. Tempo en terreno mixto (mezcla llano + cuesta suave). "
+                    f"Enfriamiento 10'. {quality_intensity_note} "
+                    f"Hidratación 500-750 ml. Practica alimentación en movimiento."
+                )
+
+        elif stype == "running_z2":
+            s["session_type"] = "trail_z2"
+            s["exercises"] = [
+                "rodaje continuo Z2 en terreno variado",
+                "movilidad de cadera en parada breve",
+            ]
+            s["notes"] = (
+                "Calentamiento 10'. Prioriza terreno blando (tierra/hierba) para reducir impacto. "
+                "Desnivel acumulado suave (±150 m si es posible). "
+                "Enfriamiento 5-10' + estiramientos suaves. Hidratación 500 ml."
+            )
+
+        elif stype == "long_run":
+            s["session_type"] = "trail_long"
+            s["exercises"] = [
+                "tirada larga progresiva en terreno de montaña",
+                "subidas a potencia constante (RPE, no ritmo)",
+                "bajadas técnicas con cadencia alta",
+                "alimentación y estrategia de avituallamiento en carrera",
+            ]
+            dur_h = round((s.get("duration_min") or 90) / 60, 1)
+            s["notes"] = (
+                f"Salida de {dur_h}h en terreno de trail. "
+                f"Objetivo: acumular desnivel positivo (+400-800 m según capacidad). "
+                f"Ritmo conversacional Z2. Practica tu estrategia real de avituallamiento: "
+                f"carbohidratos 30-60 g/h, hidratación 400-600 ml/h. "
+                f"Lleva bastones si el recorrido lo requiere."
+            )
+
+        elif stype == "recovery":
+            s["session_type"] = "trail_recovery"
+            s["exercises"] = [
+                "rodaje muy suave en terreno blando",
+                "movilidad y estiramientos de fascia plantar, cuádriceps y glúteo",
+            ]
+            s["notes"] = (
+                "Ritmo completamente libre, sin HR objetivo. "
+                "Terreno llano o bajada muy suave. "
+                "Enfriamiento con rodillo de espuma. Hidratación 400-600 ml."
+            )
+
+    return sessions
+
+
 def _generate_structured_plan_payload(
     profile: dict,
     user_message: str,
@@ -1333,12 +2083,18 @@ def _generate_structured_plan_payload(
 
     injuries = list((health or {}).get("injuries") or [])
     has_injuries = bool(injuries)
+    injuries_label = ", ".join(injuries[:2]) if injuries else ""
 
     difficulty = "moderate"
+    difficulty_reason = ""
     if has_injuries:
         difficulty = "easy"
+        difficulty_reason = f"Dificultad reducida a 'easy' por lesión activa: {injuries_label}."
     elif weekly_hours >= 10:
         difficulty = "hard"
+        difficulty_reason = f"Dificultad 'hard' por disponibilidad semanal alta ({weekly_hours}h)."
+    else:
+        difficulty_reason = f"Dificultad 'moderate' estándar."
 
     weekly_minutes = int(round(weekly_hours * 60))
     # Distribución por bloques (debe sumar 100)
@@ -1431,9 +2187,21 @@ def _generate_structured_plan_payload(
     if target_time:
         objective_text += f" con objetivo de {target_time}"
 
+    sport_primary = str((goals or {}).get("primary") or "running").strip().lower()
+    is_trail = "trail" in sport_primary
+
+    if is_trail:
+        sessions = _apply_trail_overrides(sessions, has_injuries=has_injuries)
+
+    base_description = "Plan estructurado generado por el coach a partir de objetivos y perfil del atleta."
+    if difficulty_reason:
+        plan_description = f"{base_description} {difficulty_reason}"
+    else:
+        plan_description = base_description
+
     plan = {
         "title": f"Plan hacia {race}",
-        "description": "Plan estructurado generado por el coach a partir de objetivos y perfil del atleta.",
+        "description": plan_description,
         "objective": objective_text,
         "difficulty": difficulty,
         "duration_weeks": duration_weeks,
@@ -1445,6 +2213,7 @@ def _generate_structured_plan_payload(
             "target_time": target_time,
             "weekly_training_hours": weekly_hours,
             "injuries": injuries,
+            "difficulty_reason": difficulty_reason,
             "today_focus": "Sesión de calidad o ajuste por recuperación",
             "generation_note": (user_message or "")[:240],
             "base_plan_id": (base_plan or {}).get("id"),
@@ -2883,11 +3652,20 @@ class TrainerAgent:
         hrv_yday = await _tool_json("get_hrv_data", {"date": yesterday_iso})
         sleep_today = await _tool_json("get_sleep_summary", {"date": today_iso})
         sleep_yday = await _tool_json("get_sleep_summary", {"date": yesterday_iso})
+        load_trend = await _tool_json(
+            "get_training_load_trend",
+            {
+                "start_date": (date.today() - timedelta(days=56)).isoformat(),
+                "end_date": today_iso,
+            },
+        )
 
+        # ── Actividades recientes (48h) para el briefing proactivo ─────────────
+        # Solo necesitamos las últimas actividades para saber qué entrenó ayer/hoy.
         activities_raw = await _tool_json("get_activities", {"start": "0", "limit": "12"})
-        activities = _extract_activities_list(activities_raw)
+        activities_recent = _extract_activities_list(activities_raw)
         recent_trainings: list[dict] = []
-        for activity in activities:
+        for activity in activities_recent:
             if not _is_activity_in_last_48h(activity):
                 continue
             start_local = str(activity.get("startTimeLocal") or "")
@@ -2899,6 +3677,37 @@ class TrainerAgent:
                     "activity_id": activity.get("activityId") or activity.get("id"),
                 }
             )
+
+        # ── Actividades históricas por rango de fechas para el modelo TSS/ATL/CTL ──
+        # El modelo EWMA necesita TODOS los entrenamientos del período de cálculo,
+        # independientemente del número total. Un atleta que doble sesiones tendría
+        # 2 actividades/día → limit=N actividades no garantiza cobertura temporal.
+        # Usamos get_activities_by_date con el mismo rango que days_window.
+        load_window_days = 56
+        load_start_iso = (date.today() - timedelta(days=load_window_days)).isoformat()
+        activities_for_load: list[dict] = []
+        try:
+            hist_raw = await _tool_json(
+                "get_activities_by_date",
+                {
+                    "start_date": load_start_iso,
+                    "end_date": today_iso,
+                    "page": 0,
+                    "page_size": 200,
+                },
+            )
+            if isinstance(hist_raw, dict):
+                # Soporte de paginación: extraer lista y verificar has_more
+                page_acts = _extract_activities_list(hist_raw.get("activities") or hist_raw)
+                activities_for_load.extend(page_acts)
+                # Si hay más páginas las ignoramos: 200 actividades en 56 días es
+                # más que suficiente (~3-4 sesiones/día durante 56 días) y evitamos
+                # múltiples llamadas MCP en cada arranque.
+            elif isinstance(hist_raw, list):
+                activities_for_load.extend(_extract_activities_list(hist_raw))
+        except Exception:
+            # Fallback: si get_activities_by_date no está disponible, usar las recientes
+            activities_for_load = list(activities_recent)
 
         body_summary = (
             f"hoy={_format_body_battery_day(body_today, today_iso)} · "
@@ -2913,12 +3722,37 @@ class TrainerAgent:
             f"ayer={_format_sleep_day(sleep_yday, yesterday_iso)}"
         )
 
+        load_fatigue = _compute_load_fatigue_metrics(
+            activities=activities_for_load,
+            trend_payload=load_trend,
+            profile=getattr(self, "user_profile", {}) if hasattr(self, "user_profile") else {},
+            days_window=load_window_days,
+        )
+
+        if isinstance(getattr(self, "user_profile", None), dict) and load_fatigue:
+            self.user_profile["load_metrics"] = {
+                "model": load_fatigue.get("model") or {},
+                "last": {
+                    **(load_fatigue.get("latest") or {}),
+                    "date": (load_fatigue.get("latest") or {}).get("date") or today_iso,
+                },
+                "ranges": load_fatigue.get("ranges") or {},
+                "weekly": load_fatigue.get("weekly") or {},
+                "series": load_fatigue.get("series") or [],
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            try:
+                _save_user_profile(self.user_profile)
+            except Exception:
+                pass
+
         return {
             "window_hours": 48,
             "dates": {"today": today_iso, "yesterday": yesterday_iso},
             "body_battery": {"today": body_today, "yesterday": body_yday, "summary": body_summary},
             "hrv": {"today": hrv_today, "yesterday": hrv_yday, "summary": hrv_summary},
             "sleep": {"today": sleep_today, "yesterday": sleep_yday, "summary": sleep_summary},
+            "load_fatigue": load_fatigue or {},
             "trainings": recent_trainings[:5],
         }
 
