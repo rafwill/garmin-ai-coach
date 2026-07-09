@@ -58,10 +58,10 @@ Este archivo registra el tiempo invertido por dia en el proyecto.
 | 06-07-2026 | 04:41 | sesion inicio->ultima actividad |
 | 07-07-2026 | 00:00 | sin sesiones registradas |
 | 08-07-2026 | 04:58 | sesion inicio->ultima actividad |
-| 09-07-2026 | 03:38 | session store (inicio 16:37 hora local → ultimo commit 20:15 hora local, UTC+2) |
+| 09-07-2026 | 03:43 | session store (inicio 16:37 hora local → cierre 20:20 hora local, UTC+2) |
 
 ## Total acumulado
-- 23:49
+- 23:54
 
 ## Plantilla para nuevas entradas
 
