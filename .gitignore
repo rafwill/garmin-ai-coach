@@ -13,6 +13,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 .venv/
+.venv2/
 venv/
 env/
 *.egg-info/

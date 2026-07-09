@@ -30,7 +30,6 @@ if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
 
-import httpx
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
@@ -64,6 +63,7 @@ from agent.storage import (
     find_user_by_username,
     get_active_user,
     get_training_plan,
+    is_zscaler_network as _detect_zscaler,
     list_training_plans,
     list_training_plan_sessions,
     load_athlete_knowledge,
@@ -939,16 +939,6 @@ def _check_garmin_env() -> None:
 
 # Valores placeholder que indican que la clave no está configurada
 _PLACEHOLDER_VALUES = {"", "tu_clave_mistral", "tu_clave_gemini", "gsk_...", "AIzaSy_tu_clave_de_gemini", "ghp_..."}
-
-
-def _detect_zscaler() -> bool:  # noqa: F811  (sobrescribe el import con la misma semántica)
-    """
-    Detecta si el tráfico sale a través de Zscaler (red corporativa).
-    Delegado a agent.storage.is_zscaler_network() para mantener la lógica
-    en un único lugar y reutilizar la caché entre módulos.
-    """
-    from agent.storage import is_zscaler_network
-    return is_zscaler_network()
 
 
 def _select_provider_menu(on_vpn: bool) -> str:

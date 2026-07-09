@@ -9,7 +9,6 @@ import logging
 import ssl
 import json
 import asyncio
-import hashlib
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -22,6 +21,8 @@ from mcp import ClientSession
 
 from agent.mcp_client import list_available_tools, call_tool
 from agent import storage as _storage
+
+log = logging.getLogger(__name__)
 
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
@@ -2599,7 +2600,7 @@ class _GeminiCompletions:
                             current_delay = float(sec_str) + 1.0
                         except Exception:
                             pass
-                    print(f"  [debug] Gemini ocupado ({e}). Reintentando en {current_delay:.1f}s...")
+                    log.debug(f"Gemini ocupado ({e}). Reintentando en {current_delay:.1f}s...")
                     await asyncio.sleep(current_delay)
                     delay *= 2
                 else:
@@ -2898,7 +2899,7 @@ def _parse_activities_response(raw: str | None) -> tuple[list[dict], bool, int]:
     # Formato lista directa: [{...}, {...}]
     if isinstance(data, list):
         activities = [a for a in data if isinstance(a, dict)]
-        print(f"  [debug] get_activities -> lista directa con {len(activities)} actividades")
+        log.debug(f"get_activities -> lista directa con {len(activities)} actividades")
         return activities, False, 0
 
     # Formato objeto: {"activities": [...], "has_more": ..., "next_start": ...}
@@ -2910,7 +2911,7 @@ def _parse_activities_response(raw: str | None) -> tuple[list[dict], bool, int]:
         activities = [a for a in activities if isinstance(a, dict)]
         has_more = bool(data.get("has_more") or data.get("hasMore"))
         next_start = int(data.get("next_start") or data.get("nextStart") or 0)
-        print(f"  [debug] get_activities -> objeto con {len(activities)} actividades, has_more={has_more}")
+        log.debug(f"get_activities -> objeto con {len(activities)} actividades, has_more={has_more}")
         return activities, has_more, next_start
 
     return [], False, 0
@@ -2930,16 +2931,16 @@ async def _find_activity_id_by_date(mcp_session: ClientSession, target_date_iso:
             sample = activities[0]
             # Debug exhaustivo: muestra TODOS los keys y los valores de fecha para diagnóstico
             all_keys = list(sample.keys())
-            print(f"  [debug] Primera actividad keys: {all_keys}")
+            log.debug(f"Primera actividad keys: {all_keys}")
             date_fields = {k: sample.get(k) for k in all_keys if any(x in k.lower() for x in ("time", "date", "start", "timestamp", "calendar"))}
             act_id_debug = sample.get("activityId") or sample.get("id") or sample.get("activity_id")
-            print(f"  [debug] activityId={act_id_debug} campos_fecha={date_fields}")
+            log.debug(f"activityId={act_id_debug} campos_fecha={date_fields}")
 
         for activity in activities:
             act_date = _extract_activity_date_iso(activity)
             act_id = activity.get("activityId") or activity.get("activity_id") or activity.get("id")
             if act_date:
-                print(f"  [debug] Comparando actividad {act_id}: fecha_extraida={act_date} vs target={target_date_iso}")
+                log.debug(f"Comparando actividad {act_id}: fecha_extraida={act_date} vs target={target_date_iso}")
             if act_date != target_date_iso:
                 continue
             activity_id = activity.get("activityId") or activity.get("activity_id") or activity.get("id")
@@ -4017,7 +4018,7 @@ class TrainerAgent:
         if user_date:
             pre_id = await _find_activity_id_by_date(self.mcp_session, user_date)
             if pre_id is not None:
-                print(f"  [debug] Pre-fetch actividad {user_date} -> id={pre_id}")
+                log.debug(f"Pre-fetch actividad {user_date} -> id={pre_id}")
                 raw_pre = await call_tool(self.mcp_session, "get_activity", {"activity_id": pre_id})
                 pre_data = _compact_tool_result(raw_pre, "get_activity")
                 context_parts = [f"ACTIVIDAD (activityId={pre_id}, fecha={user_date}):\n{pre_data}"]
@@ -4029,32 +4030,32 @@ class TrainerAgent:
                         "end_date": user_date,
                     })
                     bb_data = _compact_tool_result(raw_bb, "get_body_battery")
-                    print(f"  [debug] body_battery({user_date}): {bb_data[:120] if bb_data else 'None'}")
+                    log.debug(f"body_battery({user_date}): {bb_data[:120] if bb_data else 'None'}")
                     if bb_data and bb_data != "(sin datos)":
                         context_parts.append(f"BODY BATTERY del {user_date}:\n{bb_data}")
                 except Exception as e:
-                    print(f"  [debug] body_battery error: {e}")
+                    log.debug(f"body_battery error: {e}")
 
                 # Sueño de la noche previa (recuperación pre-actividad)
                 try:
                     night_before = (date.fromisoformat(user_date) - timedelta(days=1)).isoformat()
                     raw_sleep = await call_tool(self.mcp_session, "get_sleep_data", {"date": night_before})
                     sleep_data = _compact_tool_result(raw_sleep, "get_sleep_data")
-                    print(f"  [debug] sleep({night_before}): {sleep_data[:120] if sleep_data else 'None'}")
+                    log.debug(f"sleep({night_before}): {sleep_data[:120] if sleep_data else 'None'}")
                     if sleep_data and sleep_data != "(sin datos)":
                         context_parts.append(f"SUENO noche previa ({night_before}):\n{sleep_data}")
                 except Exception as e:
-                    print(f"  [debug] sleep error: {e}")
+                    log.debug(f"sleep error: {e}")
 
                 # HRV del día de la actividad
                 try:
                     raw_hrv = await call_tool(self.mcp_session, "get_hrv_data", {"date": user_date})
                     hrv_data = _compact_tool_result(raw_hrv, "get_hrv_data")
-                    print(f"  [debug] hrv({user_date}): {hrv_data[:80] if hrv_data else 'None'}")
+                    log.debug(f"hrv({user_date}): {hrv_data[:80] if hrv_data else 'None'}")
                     if hrv_data and hrv_data != "(sin datos)":
                         context_parts.append(f"HRV del {user_date}:\n{hrv_data}")
                 except Exception as e:
-                    print(f"  [debug] hrv error: {e}")
+                    log.debug(f"hrv error: {e}")
 
                 # Carga de entrenamiento — prueba con rango de 4 semanas
                 try:
@@ -4065,11 +4066,11 @@ class TrainerAgent:
                         "end_date": tl_end,
                     })
                     tl_data = _compact_tool_result(raw_tl, "get_training_load_trend")
-                    print(f"  [debug] training_load: {tl_data[:80] if tl_data else 'None'}")
+                    log.debug(f"training_load: {tl_data[:80] if tl_data else 'None'}")
                     if tl_data and tl_data != "(sin datos)":
                         context_parts.append(f"CARGA DE ENTRENAMIENTO:\n{tl_data}")
                 except Exception as e:
-                    print(f"  [debug] training_load error: {e}")
+                    log.debug(f"training_load error: {e}")
 
                 # Construir bloque de análisis pre-computado en Python
                 analysis_block = _build_activity_analysis_block(
@@ -4118,14 +4119,14 @@ class TrainerAgent:
                     ),
                 })
             else:
-                print(f"  [debug] Pre-fetch {user_date}: no se encontro actividad")
+                log.debug(f"Pre-fetch {user_date}: no se encontro actividad")
 
         _MAX_TOOL_ITER = 15
         iteration = 0
         while True:
             iteration += 1
             if iteration > _MAX_TOOL_ITER:
-                print(f"  [debug] Límite de {_MAX_TOOL_ITER} iteraciones de herramientas alcanzado. Abortando.")
+                log.debug(f"Límite de {_MAX_TOOL_ITER} iteraciones de herramientas alcanzado. Abortando.")
                 assistant_reply = "[Lo siento, la consulta requirió demasiadas llamadas a herramientas. Por favor, reformula tu pregunta de forma más concreta.]"
                 self.conversation_history.append({"role": "user", "content": user_message})
                 self.conversation_history.append({"role": "assistant", "content": assistant_reply})
@@ -4177,7 +4178,7 @@ class TrainerAgent:
                 self.total_prompt_tokens += p_toks
                 self.total_completion_tokens += c_toks
                 total_step_tokens = p_toks + c_toks
-                print(f"  [debug] Tokens - Entrada: {p_toks} | Salida: {c_toks} | Total paso: {total_step_tokens}")
+                log.debug(f"Tokens - Entrada: {p_toks} | Salida: {c_toks} | Total paso: {total_step_tokens}")
                 if getattr(self, "_api_key", None):
                     update_gemini_daily_usage(self._api_key, total_step_tokens)
 
@@ -4186,10 +4187,10 @@ class TrainerAgent:
             # Debug: muestra si el modelo llama herramientas
             if message.tool_calls:
                 tool_names = [tc.function.name for tc in message.tool_calls]
-                print(f"  [debug] Iteracion {iteration}: llamando tools -> {tool_names}")
+                log.debug(f"Iteracion {iteration}: llamando tools -> {tool_names}")
             else:
-                print(f"  [debug] Iteración {iteration}: respuesta directa (sin tool calls)")
-                print(f"  [debug] finish_reason: {response.choices[0].finish_reason}")
+                log.debug(f"Iteración {iteration}: respuesta directa (sin tool calls)")
+                log.debug(f"finish_reason: {response.choices[0].finish_reason}")
 
             # Si el modelo quiere llamar herramientas de Garmin
             if message.tool_calls:
@@ -4218,10 +4219,10 @@ class TrainerAgent:
                         if user_date:
                             resolved_id = await _find_activity_id_by_date(self.mcp_session, user_date)
                             if resolved_id is not None:
-                                print(f"  [debug] Fecha explicita {user_date} -> resolviendo a activity_id={resolved_id} (modelo propuso {arguments.get('activity_id', 'nada')})")
+                                log.debug(f"Fecha explicita {user_date} -> resolviendo a activity_id={resolved_id} (modelo propuso {arguments.get('activity_id', 'nada')})")
                                 arguments = {"activity_id": resolved_id}
                             else:
-                                print(f"  [debug] Fecha explicita {user_date} -> no se encontro actividad ese dia")
+                                log.debug(f"Fecha explicita {user_date} -> no se encontro actividad ese dia")
                                 arguments = {}
                         else:
                             arguments = await _normalize_get_activity_args(
@@ -4236,7 +4237,7 @@ class TrainerAgent:
                     arguments = _normalize_trend_date_range(tool_name, arguments)
 
                     if self.mcp_read_only and _is_write_mcp_tool(tool_name):
-                        print(f"  [debug] Bloqueada tool de escritura por MCP_READ_ONLY: {tool_name}")
+                        log.debug(f"Bloqueada tool de escritura por MCP_READ_ONLY: {tool_name}")
                         raw_result = _build_mcp_read_only_block_message(tool_name)
                         messages.append({
                             "role": "tool",
@@ -4245,7 +4246,7 @@ class TrainerAgent:
                         })
                         continue
 
-                    print(f"  [debug] Ejecutando: {tool_name}({arguments})")
+                    log.debug(f"Ejecutando: {tool_name}({arguments})")
                     if tool_name == "get_activity" and not (isinstance(arguments, dict) and arguments.get("activity_id")):
                         raw_result = await _build_activity_candidates_payload(self.mcp_session, user_message)
                     else:
@@ -4264,11 +4265,11 @@ class TrainerAgent:
                             requested_date if isinstance(requested_date, str) else None,
                         )
                         if fallback_snapshot:
-                            print("  [debug] Training readiness sin datos; usando snapshot alternativo de recuperación")
+                            log.debug("Training readiness sin datos; usando snapshot alternativo de recuperación")
                             raw_result = fallback_snapshot
 
                     tool_result = _compact_tool_result(raw_result, tool_name)
-                    print(f"  [debug] Resultado ({len(raw_result or '')} -> {len(tool_result)} chars): {tool_result[:150]}")
+                    log.debug(f"Resultado ({len(raw_result or '')} -> {len(tool_result)} chars): {tool_result[:150]}")
 
                     messages.append({
                         "role": "tool",

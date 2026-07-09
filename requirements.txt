@@ -6,6 +6,9 @@ google-genai>=1.0.0
 # Certificados SSL — necesario en redes con proxy SSL (Zscaler, etc.)
 truststore>=0.9.0
 
+# Cifrado de contraseñas (Fernet AES-128-CBC + HMAC-SHA256 en storage.py)
+cryptography>=42.0.0
+
 # MCP Python SDK (cliente para conectarse al servidor MCP de Garmin)
 mcp>=1.0.0
 
