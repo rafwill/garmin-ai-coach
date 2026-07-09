@@ -3,7 +3,7 @@
 ## Estado actual
 - Arquitectura activa: DB-first multiusuario con Supabase obligatorio.
 - RAG ligero operativo con base de conocimiento del atleta.
-- Suite de tests actual: mas de 100 tests.
+- Suite de tests actual: mas de 220 tests.
 
 ---
 

@@ -494,7 +494,7 @@ Una sesión en FTP durante exactamente 1 hora = **100 TSS**. Para running sin po
 
 ## 🧪 Tests
 
-El proyecto incluye una suite de **más de 130 tests unitarios** que cubre las funciones críticas sin necesidad de conexión a Garmin ni a ningún LLM.
+El proyecto incluye una suite de **más de 220 tests unitarios** que cubre las funciones críticas sin necesidad de conexión a Garmin ni a ningún LLM.
 
 ### Instalar dependencias de desarrollo
 ```powershell
@@ -510,7 +510,7 @@ pytest
 
 | Módulo | Qué cubre |
 |--------|-----------|
-| `trainer_agent.py` | `_seconds_to_hhmmss`, `_normalize_date_args`, `_strip_garmin_object`, `_compact_tool_result`, `_compact_personal_records`, `_clean_schema_for_gemini`, `_GeminiCompletions._parse`, resolución de actividad por fecha, zonas FC y análisis profundo, estado proactivo 48h, fallbacks de planificación, modelo de carga/fatiga (TSS/ATL/CTL/TSB), configuración por deporte, tabla de tendencia `/carga` |
+| `trainer_agent.py` | `_seconds_to_hhmmss`, `_normalize_date_args`, `_strip_garmin_object`, `_compact_tool_result`, `_compact_personal_records`, `_clean_schema_for_gemini`, `_GeminiCompletions._parse`, resolución de actividad por fecha, zonas FC y análisis profundo, estado proactivo 48h, fallbacks de planificación, modelo de carga/fatiga (TSS/ATL/CTL/TSB), configuración por deporte, tabla de tendencia `/carga`, plan trail específico, cálculo TSS por FC media (Karvonen), fetch histórico por fechas |
 | `main.py` | `_validate_date`, `_validate_time`, `_validate_hours`, `_is_first_time`, KB enriquecida de onboarding, `_ensure_garmin_credentials`, `_build_enriched_athlete_knowledge` |
 | `storage.py` | sanitización de credenciales, no-persistencia de passwords Garmin |
 
