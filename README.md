@@ -1,6 +1,6 @@
-# 🏃‍♂️ Garmin AI Coach
+# 🏃‍♂️ Kairos Coach
 
-**Garmin AI Coach** es un asistente y entrenador deportivo personal inteligente. Combina modelos de lenguaje (LLM) con tus datos deportivos reales de Garmin a través del **servidor MCP [`garmin_mcp`](https://github.com/Taxuspt/garmin_mcp)**, usando binario local cuando está instalado y `uvx` como fallback.
+**Kairos Coach** es un asistente y entrenador deportivo personal inteligente. Combina modelos de lenguaje (LLM) con tus datos deportivos reales de Garmin a través del **servidor MCP [`garmin_mcp`](https://github.com/Taxuspt/garmin_mcp)**, usando binario local cuando está instalado y `uvx` como fallback.
 
 El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbral de lactato, puntuación de resistencia...), tus récords personales históricos y tus actividades recientes para darte recomendaciones personalizadas, planes de entrenamiento y análisis de ritmos **100% basados en tus datos reales de Garmin Connect**. Con memoria persistente entre sesiones, recuerda lo que habéis hablado en conversaciones anteriores.
 
@@ -339,7 +339,7 @@ Si actualizas `garmin-mcp`, revisa estos contratos antes de desplegar cambios en
 ## 📁 Estructura del Proyecto
 
 ```
-garmin-ai-coach/
+kairos-coach/
 ├── agent/
 │   ├── __init__.py
 │   ├── main.py            # Punto de entrada: menú de proveedor, herramientas, chat e interfaz de usuario.
@@ -504,6 +504,17 @@ pip install -r requirements-dev.txt
 ### Ejecutar los tests
 ```powershell
 pytest
+```
+
+### Ejecutar con informe de cobertura
+```powershell
+pytest --cov=agent --cov-report=term-missing
+```
+
+Para generar un informe HTML navegable:
+```powershell
+pytest --cov=agent --cov-report=html
+# El informe se genera en htmlcov/index.html
 ```
 
 ### Cobertura

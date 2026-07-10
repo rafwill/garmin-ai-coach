@@ -1,4 +1,4 @@
-# TODO - GarminCoach Roadmap
+# TODO - Kairos Coach Roadmap
 
 ## Estado actual
 - Arquitectura activa: DB-first multiusuario con Supabase obligatorio.
@@ -53,6 +53,24 @@
 - Fase 4 completada: validacion funcional del prompting para generacion/manejo de planes + documentacion y tests de regresion.
 - Fase 5 completada (v1 funcional): generacion estructurada en runtime, validacion previa a persistencia, versionado por edicion y resumen de cambios entre versiones.
 
+#### 12) [COMPLETADO] Naming del producto
+- Nombre final definido: Kairos Coach.
+- Aplicado en toda la base de codigo, prompts, README y documentacion.
+
+#### 13) [COMPLETADO] Cuantificacion de carga y fatiga (TSS/ATL/TSB)
+- Modelo implementado en runtime inspirado en TrainingPeaks: TSS por sesion/dia, ATL (7d), CTL (42d) y TSB.
+- Integrado en snapshot proactivo de arranque con resumen operativo y regla aplicada de actuacion.
+- Series temporales y rangos individualizados persistidos por atleta para detectar tendencia, picos y sobrecarga sostenida.
+- Prompting actualizado con reglas obligatorias de decision:
+	- fatiga alta/TSB bajo -> reducir carga y priorizar recuperacion.
+	- disponibilidad adecuada -> permitir calidad/progresion controlada.
+	- sobrecarga sostenida -> activar descarga y prevencion de lesion.
+
+#### 14) [COMPLETADO] Pasos de ejecucion en README.md
+- Documentar pasos de ejecucion de la aplicacion en README.md.
+- Incluir instrucciones de instalacion, configuracion y uso basico.
+- Incluir instrucciones de ejecucion de tests y cobertura.
+
 ---
 
 ## ⏳ Pendiente
@@ -94,27 +112,9 @@
 - Evaluar vendorizar/congelar el codigo MCP en el repo para evitar roturas por cambios upstream.
 - Analizar que tools usamos y cuales no para traernos al codigo solo las que necesitamos.
 
-#### 12) Naming del producto
-- Definir nombre final de la aplicacion.
-
-#### 13) [COMPLETADO] Cuantificacion de carga y fatiga (TSS/ATL/TSB)
-- Modelo implementado en runtime inspirado en TrainingPeaks: TSS por sesion/dia, ATL (7d), CTL (42d) y TSB.
-- Integrado en snapshot proactivo de arranque con resumen operativo y regla aplicada de actuacion.
-- Series temporales y rangos individualizados persistidos por atleta para detectar tendencia, picos y sobrecarga sostenida.
-- Prompting actualizado con reglas obligatorias de decision:
-	- fatiga alta/TSB bajo -> reducir carga y priorizar recuperacion.
-	- disponibilidad adecuada -> permitir calidad/progresion controlada.
-	- sobrecarga sostenida -> activar descarga y prevencion de lesion.
-
 ---
 
 ## Notas de mantenimiento
 - Mantener TODO sincronizado con decisiones de arquitectura reales.
 - Evitar registrar aqui tareas ya completadas salvo resumen corto de hitos.
 - Regla de equipo: documentar siempre los cambios antes de hacer commit.
-
-
-### 14) Añadir pasos de ejecución en README.md
-- Documentar pasos de ejecucion de la aplicacion en README.md.
-- Incluir instrucciones de instalacion, configuracion y uso basico.
-- Incluir instrucciones de ejecucion de tests y cobertura.

@@ -1,5 +1,5 @@
 -- =============================================================================
--- GarminCoach — Supabase Schema (instalacion limpia)
+-- Kairos Coach — Supabase Schema (instalacion limpia)
 -- =============================================================================
 -- Ejecutar en: Supabase Dashboard -> SQL Editor -> New query -> Run.
 --

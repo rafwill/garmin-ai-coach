@@ -1,4 +1,4 @@
-# Bitacora de tiempo - Garmin AI Coach
+# Bitacora de tiempo - Kairos Coach
 
 Este archivo registra el tiempo invertido por dia en el proyecto.
 

@@ -1,6 +1,6 @@
 """
 main.py
-Punto de entrada del agente entrenador personal GarminCoach.
+Punto de entrada del agente entrenador personal Kairos Coach.
 Interfaz de conversación en terminal.
 """
 
@@ -245,7 +245,7 @@ def _authenticate_or_register_user() -> tuple[str, dict, bool, str]:
         (username, credentials, is_new_user, app_password)
     """
     console.print(Panel.fit(
-        "[bold]Acceso a GarminCoach[/]\n"
+        "[bold]Acceso a Kairos Coach[/]\n"
         "Trabajarás con un perfil independiente por usuario.",
         title="[bold blue]Identificación[/]",
         border_style="blue",
@@ -294,7 +294,7 @@ def _authenticate_or_register_user() -> tuple[str, dict, bool, str]:
         # ── Usuario nuevo: registro ────────────────────────────────────────
         console.print(Panel.fit(
             "[bold yellow]⚠ Importante — contraseña única[/]\n\n"
-            "Tu contraseña de [bold]GarminCoach[/] debe ser la misma que usas\n"
+            "Tu contraseña de [bold]Kairos Coach[/] debe ser la misma que usas\n"
             "en [bold]Garmin Connect[/]. Así podrás acceder sin volver a pedirla.\n\n"
             "Si en el futuro cambias tu contraseña en Garmin Connect,\n"
             "el sistema te pedirá actualizarla aquí también.",
@@ -483,11 +483,11 @@ def _run_first_time_setup() -> None:
     name = p.get("name", "atleta")
 
     console.print(Panel.fit(
-        f"[bold]Bienvenido, {name}![/] Primera vez configurando GarminCoach.\n"
+        f"[bold]Bienvenido, {name}![/] Primera vez configurando Kairos Coach.\n"
         "Necesito conocer tus objetivos y condiciones de salud\n"
         "para personalizar todas las recomendaciones.\n"
         "[dim]Pulsa Enter para omitir cualquier campo.[/]",
-        title="[bold green]GarminCoach — Configuración inicial[/]",
+        title="[bold green]Kairos Coach — Configuración inicial[/]",
         border_style="green",
     ))
 
@@ -573,7 +573,7 @@ def _show_plan_help() -> None:
         "  [bold cyan]/plan ver <plan_id>[/bold cyan]     Muestra detalle del plan y sus sesiones\n"
         "  [bold cyan]/plan activar <plan_id>[/bold cyan] Activa un plan y desactiva el anterior\n"
         "  [bold cyan]/plan crear[/bold cyan]             Crea un plan base en DB (interactivo)",
-        title="[bold blue]GarminCoach — Gestión de planes[/]",
+        title="[bold blue]Kairos Coach — Gestión de planes[/]",
         border_style="blue",
     ))
 
@@ -693,7 +693,7 @@ def _create_training_plan_cli(agent: TrainerAgent) -> None:
     console.print(Panel.fit(
         "Crea una planificación base persistida en BD.\n"
         "Puedes ajustar sesiones y detalles después.",
-        title="[bold blue]GarminCoach — Crear plan[/]",
+        title="[bold blue]Kairos Coach — Crear plan[/]",
         border_style="blue",
     ))
 
@@ -782,7 +782,7 @@ def _show_load_trend_cli(agent: "TrainerAgent", cmd: str = "/carga") -> None:
             "Aún no hay datos de carga/fatiga calculados.\n\n"
             "Se calculan automáticamente al arrancar la sesión.\n"
             "Reinicia el agente o realiza una consulta de estado para generarlos.",
-            title="[bold yellow]GarminCoach — Carga/Fatiga[/]",
+            title="[bold yellow]Kairos Coach — Carga/Fatiga[/]",
             border_style="yellow",
         ))
         return
@@ -861,7 +861,7 @@ def _show_help() -> None:
         "  [bold]Training Readiness[/bold] >70 entrena fuerte \u00b7 40-70 suave \u00b7 <40 recuperación activa\n"
         "  [bold]HRV[/bold]               Caída >20% = fatiga, estrés o mal control glucémico (DT1)\n"
         "  [bold]Training Status[/bold]   Productive=en forma \u00b7 Peaking=pico \u00b7 Overreaching=alarma",
-        title="[bold blue]GarminCoach — Ayuda[/]",
+        title="[bold blue]Kairos Coach — Ayuda[/]",
         border_style="blue",
     ))
 
@@ -994,7 +994,7 @@ def _select_provider_menu(on_vpn: bool) -> str:
 
     console.print(Panel.fit(
         "\n".join(menu_lines),
-        title="[bold blue]GarminCoach — Selección de modelo[/]",
+        title="[bold blue]Kairos Coach — Selección de modelo[/]",
         border_style="blue",
     ))
     choices = [str(i) for i in range(1, len(available) + 1)]
@@ -1019,7 +1019,7 @@ def _auto_select_provider() -> str:
         f"{network_line}\n"
         f"[bold green]Proveedor seleccionado:[/] {label}\n"
         f"[dim]{note}[/dim]",
-        title="[bold blue]GarminCoach — Entorno detectado[/]",
+        title="[bold blue]Kairos Coach — Entorno detectado[/]",
         border_style="blue",
     ))
     return provider
@@ -1037,7 +1037,7 @@ def _ask_tool_mode(provider: str) -> bool:
             "Con 126 herramientas los schemas solos superan ese límite, por lo que\n"
             "se usa automáticamente [bold]Essential Tools (subset reducido)[/bold].\n"
             "[dim]Para usar todas las herramientas, sal de la VPN y reinicia (usará Gemini).[/dim]",
-            title="[bold blue]GarminCoach — Herramientas[/]",
+            title="[bold blue]Kairos Coach — Herramientas[/]",
             border_style="blue",
         ))
         return True  # essential_only=True
@@ -1046,7 +1046,7 @@ def _ask_tool_mode(provider: str) -> bool:
         "[bold]Selecciona el modo de herramientas:[/]\n\n"
         "  [green]1[/green] · Essential Tools [dim](subset reducido)[/dim]   — más rápido · menor consumo de tokens  [bold]← recomendado[/bold]\n"
         "  [yellow]2[/yellow] · Todas          [dim](126 tools)[/dim]  — acceso completo · más tokens por petición",
-        title="[bold blue]GarminCoach — Herramientas[/]",
+        title="[bold blue]Kairos Coach — Herramientas[/]",
         border_style="blue",
     ))
     choice = Prompt.ask(
@@ -1090,7 +1090,7 @@ async def main() -> None:
 
     _, label, note = _PROVIDER_INFO[provider]
     console.print(Panel.fit(
-        f"[bold green]GarminCoach[/] — Tu entrenador personal con IA\n"
+        f"[bold green]Kairos Coach[/] — Tu entrenador personal con IA\n"
         f"[dim]{label} · {note}[/dim]\n"
         "[dim]Conectando con Garmin Connect...[/]",
         border_style="green",
@@ -1230,7 +1230,7 @@ async def main() -> None:
                     f"[bold green]Modelo cambiado con éxito[/]\n"
                     f"Nuevo proveedor: {label}\n"
                     f"[dim]{note}[/dim]",
-                    title="[bold blue]GarminCoach — Cambio de modelo[/]",
+                    title="[bold blue]Kairos Coach — Cambio de modelo[/]",
                     border_style="green",
                 ))
                 
@@ -1305,9 +1305,9 @@ async def main() -> None:
                 continue
 
             try:
-                with console.status("[bold green]GarminCoach está analizando tus datos...[/]"):
+                with console.status("[bold green]Kairos Coach está analizando tus datos...[/]"):
                     response = await agent.chat(user_input)
-                console.print(f"\n[bold green]GarminCoach[/]")
+                console.print(f"\n[bold green]Kairos Coach[/]")
                 console.print(Markdown(_format_coach_markdown(response)))
             except Exception as e:
                 console.print(f"\n[bold red]Error en el Agente:[/] {e}")

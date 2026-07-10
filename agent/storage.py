@@ -1,6 +1,6 @@
 """
 agent/storage.py
-Capa de persistencia multiusuario (DB-first) para GarminCoach.
+Capa de persistencia multiusuario (DB-first) para Kairos Coach.
 
 Este módulo usa Supabase como fuente de verdad para:
 - app_user (autenticación local de la app)
