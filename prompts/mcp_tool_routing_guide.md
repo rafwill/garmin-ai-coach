@@ -130,6 +130,7 @@ Cuando la intencion sea de plan de entrenamiento, separar:
 
 2. Generacion/ajuste de plan:
 - El coach genera propuesta estructurada con sesiones y criterios de ajuste por fatiga.
+- Antes de generar, consultar historial amplio (8-12 semanas) con `get_activities` para calibrar nivel real.
 - Si hay cambios, tratarlos como nueva version conceptual del plan.
 
 3. Gestion persistente del plan (CLI):
@@ -140,6 +141,19 @@ Cuando la intencion sea de plan de entrenamiento, separar:
 
 Regla:
 - No afirmar que un plan se guardó o activó sin ejecutar una accion de gestion real.
+
+## 7.3) Cruce plan activo con datos del dia (OBLIGATORIO cuando hay plan activo)
+
+### Antes del entreno
+1. Estado diario completo: `get_morning_training_readiness`, `get_body_battery`, `get_sleep_summary`, `get_hrv_data`, `get_stress_summary`.
+2. Consultar sesion planificada del dia en `training_plan_session`.
+3. Decidir: ejecutar (\u1f7e2) / reducir intensidad (\u1f7e1) / posponer (\u1f7e0) / swapear por recuperacion (\u1f534).
+
+### Despues del entreno (compliance)
+1. Analisis de actividad reciente: `get_activities` + `get_activity`.
+2. Consultar sesion planificada del dia en `training_plan_session`.
+3. Comparar: distancia real vs planificada, zonas FC reales vs intensidad planificada, tipo de sesion.
+4. Dar analisis de desviacion y ajuste propuesto para la semana.
 
 ## 7.1) Estado del plan (si tiene plan o no)
 
@@ -154,6 +168,15 @@ Ejemplos de intencion equivalente:
 Regla operativa:
 - Resolver contra `training_plan` (perfil interno), no contra `goals`.
 - `goals` no implica automaticamente plan activo.
+
+---
+
+## 7.4) Herramientas internas Kairos (kairos_*)
+
+Estas herramientas se invocan igual que las MCP pero no llaman al servidor Garmin:
+- `kairos_load_trends`: serie temporal de TSS/ATL/CTL/TSB desde el perfil. Usar para preguntas de tendencias de carga/fatiga/forma a lo largo del tiempo.
+- `kairos_correlate`: correlacion de Pearson entre dos metricas (tss, atl, ctl, tsb). Usar para preguntas de relacion entre metricas.
+- `kairos_weekly_sport_breakdown`: desglose de actividades por deporte en N semanas. Usar para preguntas de distribucion de entrenamiento entre disciplinas.
 
 ---
 

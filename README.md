@@ -1,8 +1,91 @@
 # 🏃‍♂️ Kairos Coach
 
-**Kairos Coach** es un asistente y entrenador deportivo personal inteligente. Combina modelos de lenguaje (LLM) con tus datos deportivos reales de Garmin a través del **servidor MCP [`garmin_mcp`](https://github.com/Taxuspt/garmin_mcp)**, usando binario local cuando está instalado y `uvx` como fallback.
+**Kairos Coach** es un entrenador deportivo personal con IA que corre en tu terminal. No es un chatbot genérico: tiene acceso en tiempo real a todos tus datos de Garmin Connect, te conoce por tu perfil, recuerda lo que habéis hablado en sesiones anteriores, **calcula métricas de rendimiento en Python antes de pasárselas al LLM**, y guarda tu plan de entrenamiento en base de datos con versionado completo.
 
-El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbral de lactato, puntuación de resistencia...), tus récords personales históricos y tus actividades recientes para darte recomendaciones personalizadas, planes de entrenamiento y análisis de ritmos **100% basados en tus datos reales de Garmin Connect**. Con memoria persistente entre sesiones, recuerda lo que habéis hablado en conversaciones anteriores.
+La conversación con el coach tiene contexto real porque los números son reales. Antes de responder cualquier pregunta sobre estado, rendimiento o recomendaciones, el sistema consulta tus datos de Garmin. Nunca inventa, nunca generaliza.
+
+---
+
+## 🎯 Qué hace concretamente
+
+#### 1. Habla contigo como un entrenador real, no como un chatbot genérico
+Antes de responder cualquier cosa, el agente consulta tus datos reales de Garmin: cómo dormiste anoche, tu HRV de hoy, tu body battery, el estrés acumulado. Solo entonces da una recomendación. No inventa datos ni generaliza. Si Garmin no tiene datos para esa fecha, lo dice.
+
+#### 2. Pre-computa en Python — el LLM solo interpreta
+Cuando analizas una actividad, el sistema calcula en Python antes de llamar al LLM:
+- Duraciones de segundos a HH:MM:SS
+- Ritmo en min/km desde distancia y duración
+- Distribución de tiempo en zonas de FC (Z1–Z5) mediante distribución gaussiana centrada en la FC media
+- Hidratación recomendada según duración y tipo de actividad
+- Carga de entrenamiento (TSS) y efecto aeróbico/anaeróbico
+
+El LLM recibe un bloque `=== RESUMEN DE ACTIVIDAD ===` ya calculado y se dedica exclusivamente a interpretar y hacer coaching. Nunca hace aritmética.
+
+#### 3. Modelo de carga/fatiga propio (tipo TrainingPeaks)
+En cada arranque de sesión, el sistema calcula automáticamente:
+- **TSS** (Training Stress Score): carga por sesión
+- **ATL** (Fatiga Aguda, τ 7–8 días según deporte): cuánto has acumulado a corto plazo
+- **CTL** (Fitness Crónico, τ 42–45 días): tu nivel de forma construido en semanas
+- **TSB** (Forma = CTL − ATL): disponibilidad real para entrenar hoy
+
+Los tau y percentiles se ajustan automáticamente al deporte principal (running, trail, ciclismo, triatlón). Los rangos son **individualizados** a tus propios datos históricos, no umbrales genéricos. La serie completa (hasta 120 días) se persiste en Supabase. Con las herramientas `kairos_load_trends` y `kairos_correlate`, el agente puede calcular correlaciones estadísticas y tendencias directamente sobre esa serie.
+
+#### 4. Planes de entrenamiento versionados y persistidos
+Puedes pedirle que te cree un plan de entrenamiento y lo guarda en Supabase (`training_plan`, `training_plan_session`, `training_plan_version`). Cada edición genera un snapshot de versión. El plan incluye sesiones estructuradas con calentamiento, parte principal en RPE, enfriamiento, hidratación y notas específicas. Si eres corredor de trail, las sesiones se adaptan con contenido específico de montaña. El coach sabe en todo momento si tienes plan activo o no, sin depender del LLM para esa decisión.
+
+#### 5. Estado proactivo al arrancar (sin que preguntes nada)
+Cada vez que inicias el agente, recibe automáticamente:
+- Body battery de hoy y ayer
+- HRV de hoy y ayer
+- Calidad del sueño de anoche
+- Resumen de carga/fatiga (TSS · ATL · CTL · TSB · semana + regla aplicada)
+- Entrenamientos de las últimas 48h
+- Si tienes plan activo: propuesta de adaptar la sesión de hoy
+
+Esto funciona como el briefing que te daría un entrenador de élite antes de que hagas la primera pregunta.
+
+#### 6. Memoria entre sesiones
+Al salir, el agente resume la conversación con el propio LLM. Los últimos 5 resúmenes se inyectan como contexto al arrancar la siguiente sesión. El coach recuerda que hace tres días hablasteis de la fascitis plantar, o que lleváis dos semanas trabajando el umbral.
+
+#### 7. Sistema multiusuario con autenticación
+Varias personas pueden usar la misma instalación. Cada usuario tiene perfil, historial, plan y base de conocimiento separados. La contraseña se almacena cifrada con Fernet AES-128 + HMAC-SHA256. El auto-login evita escribir la contraseña en cada sesión.
+
+#### 8. 6 proveedores de LLM seleccionables en caliente
+Gemini, Groq, Mistral, Cerebras, NVIDIA NIM y GitHub Models (VPN). La detección de red es automática. Se puede cambiar de modelo durante la sesión con `/modelo` sin perder el hilo de la conversación.
+
+#### 9. Protocolo médico DT1
+Si el perfil incluye Diabetes Tipo 1, el agente aplica protocolos de seguridad glucémica en cada recomendación: diferencia entre ejercicio aeróbico (baja glucemia) e intenso (puede subirla), vigila HRV y body battery como posibles indicadores de hipoglucemia nocturna, y nunca invade competencias médicas.
+
+---
+
+## 📐 ¿Cómo consigue Kairos hacer esto?
+
+La respuesta es una arquitectura en tres capas donde **los datos siempre van por delante del LLM**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  CLI (main.py)                                                  │
+│  Terminal interactivo · Rich UI · Multiusuario · Login          │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│  TrainerAgent (trainer_agent.py)                                │
+│  Agente LLM · 6 proveedores · Tool calling · Pre-cómputo        │
+│  Rutas deterministas · Memoria · RAG · TSS/ATL/CTL/TSB          │
+│  Tools internas (kairos_*) · 223 tests                          │
+└──────────┬────────────────────────────────┬─────────────────────┘
+           │                                │
+┌──────────▼──────────┐         ┌──────────▼──────────────────────┐
+│  Garmin MCP         │         │  Supabase (storage.py)          │
+│  ~80 tools live     │         │  7 tablas · Multiusuario        │
+│  datos en tiempo    │         │  Perfil · Plan · Sesiones       │
+│  real vía stdio     │         │  TSS series · Knowledge         │
+└─────────────────────┘         └─────────────────────────────────┘
+```
+
+**Capa de datos (sistema):** conecta con Garmin Connect, pre-procesa y calcula todas las métricas antes de entregárselas al LLM (ritmo en min/km, zonas FC por distribución gaussiana, hidratación estimada, TSS/ATL/CTL/TSB).
+
+**Capa de coaching (LLM):** recibe datos ya calculados y aporta interpretación, contextualización con el perfil del atleta y recomendaciones accionables. Nunca hace aritmética.
 
 ---
 
@@ -131,11 +214,6 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
   - Todos los cálculos (zonas de FC Z1–Z5 con % y minutos, ritmo en min/km, hidratación estimada, efecto de entrenamiento) se realizan **en Python**, no en el LLM.
   - El LLM recibe un bloque estructurado pre-computado y se dedica exclusivamente a interpretar y hacer coaching.
 
-* **🧠 Arquitectura de dos capas (datos + coaching):**
-  - **Capa de datos**: conecta con Garmin Connect, pre-procesa y formatea todas las métricas antes de pasarlas al LLM.
-  - **Capa de coaching (LLM)**: recibe datos ya calculados y aporta interpretación, contextualización con el perfil del atleta y recomendaciones accionables.
-  - Esta separación está documentada en el system prompt y garantiza que el LLM nunca intente calcular cosas que ya ha hecho el sistema.
-
 * **💾 Memoria persistente entre sesiones:**
   - Al salir, el agente genera automáticamente un resumen compacto de la sesión con el propio LLM.
   - Los últimos 5 resúmenes se inyectan como contexto al arrancar la siguiente sesión — el agente recuerda lo que habéis hablado.
@@ -149,6 +227,28 @@ El agente analiza tus métricas de rendimiento (VO2Max, HRV, sueño, SPO2, umbra
 
 * **🔧 Sin dependencias de Node.js:**
   - El servidor MCP es 100% Python, lanzado por `garmin-mcp` local o `uvx` en fallback.
+
+* **📊 Motor de análisis histórico (herramientas internas `kairos_*`):**
+  - Tres herramientas Python puras que el LLM puede invocar directamente, sin llamadas extra al MCP:
+    - `kairos_load_trends`: devuelve la serie temporal de TSS, ATL, CTL o TSB con granularidad diaria y semanal. Cubre preguntas como *"¿cómo ha evolucionado mi forma en los últimos 2 meses?"*
+    - `kairos_correlate`: calcula la correlación de Pearson entre dos métricas de carga/fatiga (N, r, intensidad e interpretación). Cubre preguntas como *"¿correlaciona mi TSS semanal con mi TSB?"*
+    - `kairos_weekly_sport_breakdown`: agrega actividades Garmin por deporte en N semanas — sesiones, horas y km por disciplina. Para multideportistas y triatletas.
+  - Fuente: `load_metrics.series` persistido en Supabase (ya calculado al arrancar) + Garmin MCP live para actividades.
+
+* **🧠 Inteligencia de prompting mejorada:**
+  El system prompt incorpora reglas de análisis aprendidas del estado del arte:
+  - **Relaciones > valores aislados**: nunca reporta un valor puntual sin cruzarlo con otra métrica relacionada (HRV + sueño + body battery como composite de recuperación).
+  - **Tendencia + valor puntual**: para HRV, body battery, sueño, FC en reposo y VO₂máx, siempre muestra valor de hoy + media 7d + dirección. Ejemplo: *"HRV hoy: 42ms (media 7d: 48ms → tendencia descendente)"*
+  - **Detección de anomalías biométricas**: detecta y reporta flags independientes de la carga (FC reposo elevada sin carga, sueño malo ≥2 noches, HRV ≥15% bajo media 7d, body battery crónicamente <30).
+  - **Transparencia de datos**: si el dato es N=1 o ruidoso, lo indica explícitamente antes de interpretar.
+  - **Protocolo plan activo ↔ datos del día**: antes del entreno, cruza readiness/TSB con la sesión planificada (✅/🔴/🟠/🟡); después, compara ejecutado vs planificado con análisis de desviación.
+  - **Historial profundo para planes**: al generar un plan, analiza las últimas 8–12 semanas de actividades reales para calibrar el nivel de partida real del atleta.
+  - **Race Readiness**: si hay carrera objetivo, monitoriza progresión del largo, desnivel semanal y volumen vs. demanda de la carrera.
+  - **Revisión post-sesión**: cuando el usuario comparte una actividad sin pedir análisis profundo, el coach da una nota estructurada rápida (qué fue bien / qué desvió / un ajuste).
+
+* **✅ CI/CD con GitHub Actions:**
+  - `.github/workflows/tests.yml` ejecuta la suite completa de pytest (223 tests) en cada push y pull request.
+  - Sin credenciales reales: los tests mockean toda la capa de Supabase y Garmin.
 
 ---
 
@@ -368,6 +468,25 @@ kairos-coach/
 ├── TODO.md                # Roadmap y mejoras futuras planificadas.
 └── README.md
 ```
+
+---
+
+## 📊 Comparativa con otras soluciones
+
+| Capacidad | Kairos Coach | FitMCP / TP-MCP |
+|---|:---:|:---:|
+| Datos en tiempo real (live MCP) | ✅ | ❌ (sync manual) |
+| Modelo TSS/ATL/CTL/TSB propio | ✅ percentiles individualizados | ✅ nativo TP |
+| Sistema multiusuario cloud | ✅ Supabase | ❌ single-user local |
+| Protocolo médico DT1 | ✅ | ❌ |
+| Especialización trail running | ✅ | ❌ |
+| Memoria persistente entre sesiones | ✅ (5 resúmenes) | ❌ |
+| Pre-cómputo en Python (zonas FC, ritmo, hidratación) | ✅ | ❌ |
+| Rutas deterministas para plan y PRs | ✅ | ❌ |
+| Escritura en calendario externo (TP, Garmin) | ❌ | ✅ TP |
+| Comparación planificado vs ejecutado | ❌ pendiente | ✅ TP |
+| Annual Training Plan (ATP) | ❌ pendiente | ✅ TP |
+| Power PRs por duración (5s–90min) | ❌ pendiente | ✅ TP |
 
 ---
 

@@ -62,7 +62,7 @@ def _get_server_params(essential_only: bool = True) -> StdioServerParameters:
         # Perfil personal del usuario
         "get_user_profile,"
         # Actividades
-        "get_activities,get_activity,"
+        "get_activities,get_activity,get_activities_by_date,"
         # Salud diaria (versiones ligeras donde existen)
         "get_stats,get_sleep_summary,get_sleep_data,"
         "get_heart_rates_summary,get_stress_summary,get_respiration_summary,"
