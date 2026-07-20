@@ -676,3 +676,92 @@ def check_supabase_connection() -> dict:
         return {"configured": True, "connected": True, "error": None}
     except Exception as exc:
         return {"configured": True, "connected": False, "error": str(exc)}
+
+
+# ─── load_metrics_daily ────────────────────────────────────────────────────────
+
+def get_load_metrics_series(days: int = 120) -> list[dict]:
+    """Carga la serie TSS/ATL/CTL/TSB desde load_metrics_daily (últimos N días)."""
+    from datetime import date, timedelta
+    sb = _supabase()
+    uid = _require_active_user_id()
+    if not sb:
+        return []
+    try:
+        start_date = (date.today() - timedelta(days=days)).isoformat()
+        resp = (
+            sb.table("load_metrics_daily")
+            .select("metric_date, tss, atl, ctl, tsb, activities_count")
+            .eq("app_user_id", uid)
+            .gte("metric_date", start_date)
+            .order("metric_date", desc=False)
+            .execute()
+        )
+        return [
+            {
+                "date": str(r["metric_date"]),
+                "tss": round(float(r.get("tss") or 0), 2),
+                "atl": round(float(r.get("atl") or 0), 2),
+                "ctl": round(float(r.get("ctl") or 0), 2),
+                "tsb": round(float(r.get("tsb") or 0), 2),
+                "activities_count": int(r.get("activities_count") or 0),
+            }
+            for r in (resp.data or [])
+        ]
+    except Exception as exc:
+        log.warning("get_load_metrics_series: %s", exc)
+        return []
+
+
+def get_load_metrics_last_date() -> str | None:
+    """Devuelve la fecha ISO del último registro en load_metrics_daily, o None."""
+    sb = _supabase()
+    uid = _require_active_user_id()
+    if not sb:
+        return None
+    try:
+        resp = (
+            sb.table("load_metrics_daily")
+            .select("metric_date")
+            .eq("app_user_id", uid)
+            .order("metric_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        return str(rows[0]["metric_date"]) if rows else None
+    except Exception as exc:
+        log.warning("get_load_metrics_last_date: %s", exc)
+        return None
+
+
+def upsert_load_metrics_series(series: list[dict]) -> None:
+    """Persiste (upsert) filas TSS/ATL/CTL/TSB en load_metrics_daily."""
+    sb = _supabase()
+    uid = _require_active_user_id()
+    if not sb or not series:
+        return
+    try:
+        rows = [
+            {
+                "app_user_id": uid,
+                "metric_date": row["date"],
+                "tss": round(float(row.get("tss") or 0), 2),
+                "atl": round(float(row.get("atl") or 0), 2),
+                "ctl": round(float(row.get("ctl") or 0), 2),
+                "tsb": round(float(row.get("tsb") or 0), 2),
+                "activities_count": int(row.get("activities_count") or 0),
+            }
+            for row in series
+            if row.get("date")
+        ]
+        if not rows:
+            return
+        # Upsert en lotes de 200 para evitar límites de payload
+        for i in range(0, len(rows), 200):
+            sb.table("load_metrics_daily").upsert(
+                rows[i:i + 200], on_conflict="app_user_id,metric_date"
+            ).execute()
+        log.info("upsert_load_metrics_series: %d filas persistidas", len(rows))
+    except Exception as exc:
+        log.warning("upsert_load_metrics_series: %s", exc)

@@ -1388,7 +1388,7 @@ def _build_load_trend_table(series: list[dict], mode: str = "weeks") -> str:
 
 def _format_load_fatigue_summary(load_metrics: dict | None) -> str:
     """Genera resumen textual corto para el bloque proactivo."""
-    if not isinstance(load_metrics, dict):
+    if not isinstance(load_metrics, dict) or not load_metrics.get("latest"):
         return "sin datos suficientes"
     latest = load_metrics.get("latest") or {}
     weekly = load_metrics.get("weekly") or {}
@@ -1475,7 +1475,7 @@ def _build_proactive_status_markdown(snapshot: dict) -> str:
     lines.append("- Sueno: " + (sleep_summary or "sin datos recientes"))
     lines.append("- Carga/Fatiga (TSS/ATL/CTL/TSB): " + _format_load_fatigue_summary(load_fatigue))
 
-    if load_fatigue:
+    if load_fatigue and load_fatigue.get("latest"):
         latest = load_fatigue.get("latest") or {}
         ranges = load_fatigue.get("ranges") or {}
         weekly = load_fatigue.get("weekly") or {}
@@ -1498,6 +1498,16 @@ def _build_proactive_status_markdown(snapshot: dict) -> str:
                 f"  - ⚙️ Modelo en calibracion ({int(load_fatigue.get('days_with_load') or 0)} dias con datos). "
                 f"Los rangos seran fiables en ~{weeks_rem} semana{'s' if weeks_rem != 1 else ''} mas."
             )
+    elif not load_fatigue.get("latest"):
+        # Sin datos calculados — mostrar diagnóstico para entender el motivo
+        load_debug = str(snapshot.get("load_debug") or "").strip()
+        if "sin actividades" in load_debug or "usuario nuevo" in load_debug:
+            lines.append(
+                "  ⚠️ Sin histórico de entrenamientos detectado — "
+                "el modelo se calibrará en ~3 semanas una vez se registren actividades en Garmin."
+            )
+        elif load_debug and load_debug not in ("ok",):
+            lines.append(f"  ⚠️ No se pudieron obtener actividades históricas · diagnóstico: {load_debug}")
 
     if trainings:
         lines.append("- Entrenamientos recientes:")
@@ -3610,6 +3620,156 @@ _KAIROS_INTERNAL_TOOLS: list[dict] = [
 ]
 
 
+# ─── Helpers para cálculo incremental de carga/fatiga ─────────────────────────
+
+async def _fetch_activities_for_load_calc(
+    mcp_session: ClientSession,
+    start_date_iso: str,
+    end_date_iso: str,
+) -> list[dict]:
+    """Obtiene actividades en el rango [start_date, end_date] usando paginación de get_activities.
+
+    Usa el mismo mecanismo paginado que _find_activity_id_by_date (probado y funcional).
+    Para cuando start_date esté lejos en el tiempo pagina hacia atrás hasta encontrar
+    actividades más antiguas que start_date.
+    """
+    from datetime import date as _date
+    try:
+        start_d = _date.fromisoformat(start_date_iso)
+        end_d   = _date.fromisoformat(end_date_iso)
+    except Exception:
+        return []
+
+    result: list[dict] = []
+    seen_ids: set = set()
+    start_idx = 0
+    limit = 100
+    max_pages = 50   # hasta 5000 actividades — suficiente para historiales de 120 días
+
+    for _ in range(max_pages):
+        raw = await call_tool(mcp_session, "get_activities", {"start": str(start_idx), "limit": str(limit)})
+        activities, has_more, next_start = _parse_activities_response(raw)
+
+        if not activities:
+            break
+
+        stop_early = False
+        for act in activities:
+            if not isinstance(act, dict):
+                continue
+            act_id = act.get("activityId") or act.get("id") or act.get("activity_id")
+            if act_id is not None and act_id in seen_ids:
+                continue
+            if act_id is not None:
+                seen_ids.add(act_id)
+
+            d_iso = _extract_activity_date_iso(act)
+            if not d_iso:
+                continue
+            try:
+                d_obj = _date.fromisoformat(d_iso)
+            except Exception:
+                continue
+
+            if d_obj > end_d:
+                continue   # más reciente que el rango, seguir paginando
+            if d_obj < start_d:
+                stop_early = True
+                break      # más antigua que el inicio, no hay más relevantes
+            result.append(act)
+
+        if stop_early or not has_more:
+            break
+        new_start = next_start if next_start > start_idx else start_idx + limit
+        if new_start <= start_idx:
+            break
+        start_idx = new_start
+
+    log.info(
+        "_fetch_activities_for_load_calc: %d actividades obtenidas [%s → %s]",
+        len(result), start_date_iso, end_date_iso,
+    )
+    return result
+
+
+def _build_load_fatigue_dict_from_series(series: list[dict], model_cfg: dict) -> dict | None:
+    """Construye el dict de carga/fatiga completo a partir de una serie ya calculada.
+
+    Equivale al bloque final de _compute_load_fatigue_metrics pero reutiliza
+    la serie persistida en DB en lugar de recalcularla.
+    """
+    if not series:
+        return None
+
+    latest = series[-1]
+    last_28 = series[-28:] if len(series) >= 28 else series[:]
+    last_42 = series[-42:] if len(series) >= 42 else series[:]
+    atl_values = [float(x["atl"]) for x in last_28]
+    tsb_values = [float(x["tsb"]) for x in last_28]
+
+    weekly_tss_values: list[float] = []
+    for idx in range(0, len(last_42), 7):
+        chunk = last_42[idx:idx + 7]
+        if chunk:
+            weekly_tss_values.append(round(sum(float(x["tss"]) for x in chunk), 1))
+    current_week_tss = round(sum(float(x["tss"]) for x in series[-7:]), 1)
+
+    tsb_low  = round(_percentile(tsb_values, float(model_cfg.get("tsb_low_pct") or 0.20), default=-10.0), 1)
+    tsb_high = round(_percentile(tsb_values, float(model_cfg.get("tsb_high_pct") or 0.80), default=5.0), 1)
+    atl_high = round(_percentile(atl_values, float(model_cfg.get("atl_high_pct") or 0.80), default=max(50.0, float(latest["atl"]))), 1)
+    weekly_target = round(_percentile(weekly_tss_values, float(model_cfg.get("weekly_target_pct") or 0.55), default=current_week_tss), 1)
+    weekly_high   = round(_percentile(weekly_tss_values, float(model_cfg.get("weekly_high_pct") or 0.85), default=max(current_week_tss, weekly_target * 1.15)), 1)
+
+    days_with_load = sum(1 for x in series if float(x.get("tss") or 0.0) > 0)
+    _MIN_DAYS = 21
+    warming_up = days_with_load < _MIN_DAYS
+
+    tsb_now = float(latest["tsb"])
+    atl_now = float(latest["atl"])
+    tsb_abs_floor = float(model_cfg.get("tsb_abs_floor") or -30.0)
+    abs_overload = tsb_now <= tsb_abs_floor
+    sustained_overload = len(series) >= 7 and all(float(x["tsb"]) <= tsb_low for x in series[-7:])
+    fatigue_high = (tsb_now < tsb_low) or (atl_now > atl_high)
+    available_for_quality = (tsb_now >= tsb_low) and (tsb_now <= max(tsb_high, tsb_low + 4.0)) and not fatigue_high
+
+    if abs_overload or sustained_overload or (current_week_tss > weekly_high and tsb_now < tsb_low):
+        status = "overload"; action = "sobrecarga sostenida"
+        recommendation = "Activa semana de descarga (−30% a −40% de volumen) y elimina calidad intensa 3-5 dias."
+    elif fatigue_high:
+        status = "fatigue_high"; action = "fatiga alta"
+        recommendation = "Reduce intensidad/volumen hoy y prioriza recuperación activa, sueño e hidratación."
+    elif available_for_quality:
+        status = "ready"; action = "buena disponibilidad"
+        recommendation = "Puedes mantener sesión de calidad o progresión controlada según plan."
+    else:
+        status = "neutral"; action = "carga estable"
+        recommendation = "Mantén carga aeróbica controlada y reevalúa mañana con HRV/sueño/estrés."
+
+    return {
+        "model": {
+            "name": "tp-inspired-ewma",
+            "sport": str((model_cfg.get("_sport") or "running")),
+            "atl_tau_days": int(model_cfg.get("atl_tau_days") or 7),
+            "ctl_tau_days": int(model_cfg.get("ctl_tau_days") or 42),
+        },
+        "latest": latest,
+        "series": series[-120:],
+        "weekly": {"current_tss": current_week_tss, "target_tss": weekly_target, "high_tss": weekly_high},
+        "ranges": {"tsb_low": tsb_low, "tsb_high": tsb_high, "atl_high": atl_high, "tsb_abs_floor": tsb_abs_floor},
+        "warming_up": warming_up,
+        "warming_up_days_remaining": max(0, _MIN_DAYS - days_with_load),
+        "days_with_load": days_with_load,
+        "flags": {
+            "fatigue_high": fatigue_high, "sustained_overload": sustained_overload,
+            "abs_overload": abs_overload, "available_for_quality": available_for_quality,
+            "warming_up": warming_up,
+        },
+        "status": status,
+        "action": action,
+        "recommendation": recommendation,
+    }
+
+
 class TrainerAgent:
     """
     Agente entrenador personal que usa OpenAI + Garmin MCP.
@@ -3867,6 +4027,7 @@ class TrainerAgent:
         load_window_days = 56
         load_start_iso = (date.today() - timedelta(days=load_window_days)).isoformat()
         activities_for_load: list[dict] = []
+        _load_debug: str = "ok"
         try:
             hist_raw = await _tool_json(
                 "get_activities_by_date",
@@ -3878,17 +4039,43 @@ class TrainerAgent:
                 },
             )
             if isinstance(hist_raw, dict):
-                # Soporte de paginación: extraer lista y verificar has_more
                 page_acts = _extract_activities_list(hist_raw.get("activities") or hist_raw)
                 activities_for_load.extend(page_acts)
-                # Si hay más páginas las ignoramos: 200 actividades en 56 días es
-                # más que suficiente (~3-4 sesiones/día durante 56 días) y evitamos
-                # múltiples llamadas MCP en cada arranque.
             elif isinstance(hist_raw, list):
                 activities_for_load.extend(_extract_activities_list(hist_raw))
-        except Exception:
-            # Fallback: si get_activities_by_date no está disponible, usar las recientes
-            activities_for_load = list(activities_recent)
+            elif isinstance(hist_raw, str):
+                # get_activities_by_date devolvió cadena — intentar parseo manual
+                try:
+                    parsed = json.loads(hist_raw)
+                    if isinstance(parsed, list):
+                        activities_for_load.extend(_extract_activities_list(parsed))
+                    elif isinstance(parsed, dict):
+                        activities_for_load.extend(_extract_activities_list(parsed.get("activities") or parsed))
+                except Exception:
+                    pass
+        except Exception as _e:
+            _load_debug = f"excepcion get_activities_by_date: {_e}"
+            log.warning("collect_startup: get_activities_by_date falló: %s", _e)
+
+        # Fallback: si get_activities_by_date no retornó actividades, intentar get_activities con mayor límite
+        if not activities_for_load:
+            _load_debug = "get_activities_by_date sin datos — usando fallback get_activities(100)"
+            log.info("collect_startup: get_activities_by_date sin datos, fallback a get_activities(100)")
+            try:
+                fallback_raw = await _tool_json("get_activities", {"start": "0", "limit": "100"})
+                activities_for_load = _extract_activities_list(fallback_raw)
+                if activities_for_load:
+                    log.info("collect_startup: fallback ok — %d actividades obtenidas", len(activities_for_load))
+                    _load_debug = f"fallback ok: {len(activities_for_load)} actividades via get_activities"
+                else:
+                    _load_debug = "sin actividades en fallback — usuario nuevo o sin datos en Garmin"
+                    log.info("collect_startup: fallback también vacío — usuario nuevo o sin datos")
+            except Exception as _e2:
+                _load_debug = f"fallback también falló: {_e2}"
+                log.warning("collect_startup: fallback get_activities falló: %s", _e2)
+                activities_for_load = list(activities_recent)
+        else:
+            log.info("collect_startup: %d actividades obtenidas via get_activities_by_date", len(activities_for_load))
 
         body_summary = (
             f"hoy={_format_body_battery_day(body_today, today_iso)} · "
@@ -3934,6 +4121,7 @@ class TrainerAgent:
             "hrv": {"today": hrv_today, "yesterday": hrv_yday, "summary": hrv_summary},
             "sleep": {"today": sleep_today, "yesterday": sleep_yday, "summary": sleep_summary},
             "load_fatigue": load_fatigue or {},
+            "load_debug": _load_debug,
             "trainings": recent_trainings[:5],
         }
 

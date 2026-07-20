@@ -135,6 +135,26 @@ alter table training_plan_version disable row level security;
 create index if not exists idx_training_plan_version_plan
     on training_plan_version (plan_id, version_number desc);
 
+-- ─── load_metrics_daily ──────────────────────────────────────────────────────
+-- Almacena TSS/ATL/CTL/TSB calculados por día por usuario.
+-- Permite cálculo incremental: solo recalcular desde el último registro.
+create table if not exists load_metrics_daily (
+    app_user_id      text          not null references app_user(id) on delete cascade,
+    metric_date      date          not null,
+    tss              numeric(10,2) not null default 0,
+    atl              numeric(10,2) not null default 0,
+    ctl              numeric(10,2) not null default 0,
+    tsb              numeric(10,2) not null default 0,
+    activities_count integer       not null default 0,
+    updated_at       timestamptz   not null default now(),
+    primary key (app_user_id, metric_date)
+);
+
+alter table load_metrics_daily disable row level security;
+
+create index if not exists idx_load_metrics_daily_user_date
+    on load_metrics_daily (app_user_id, metric_date desc);
+
 -- ─── Triggers updated_at ────────────────────────────────────────────────────
 drop trigger if exists trg_user_profile_updated_at on user_profile;
 create trigger trg_user_profile_updated_at
@@ -169,6 +189,11 @@ create trigger trg_training_plan_updated_at
 drop trigger if exists trg_training_plan_session_updated_at on training_plan_session;
 create trigger trg_training_plan_session_updated_at
     before update on training_plan_session
+    for each row execute function _set_updated_at();
+
+drop trigger if exists trg_load_metrics_daily_updated_at on load_metrics_daily;
+create trigger trg_load_metrics_daily_updated_at
+    before update on load_metrics_daily
     for each row execute function _set_updated_at();
 
 commit;
