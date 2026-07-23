@@ -1160,6 +1160,27 @@ async def main() -> None:
             f" ({active.get('user_id') or 'sin-id'})[/]"
         )
 
+        # ── Cálculo incremental de carga/fatiga (obligatorio antes del briefing) ──────
+        # Calcula TSS/ATL/CTL/TSB para los días nuevos desde el último registro en DB.
+        # Persiste en load_metrics_daily y actualiza agent.user_profile["load_metrics"].
+        try:
+            with console.status("[dim]Calculando métricas de carga/fatiga (TSS·ATL·CTL·TSB)...[/]"):
+                await agent.compute_and_persist_load_metrics()
+            lm = (agent.user_profile or {}).get("load_metrics") or {}
+            last = lm.get("last") or {}
+            if last.get("atl") or last.get("ctl"):
+                console.print(
+                    f"[green]✓[/] Carga/fatiga: "
+                    f"ATL={float(last.get('atl', 0)):.1f} · "
+                    f"CTL={float(last.get('ctl', 0)):.1f} · "
+                    f"TSB={float(last.get('tsb', 0)):.1f} "
+                    f"([dim]{len(lm.get('series', []))} días[/dim])"
+                )
+            else:
+                console.print("[dim yellow]⚠ Carga/fatiga: sin actividades suficientes para calcular[/]")
+        except Exception as _load_exc:
+            console.print(f"[dim yellow]⚠ Carga/fatiga no calculada: {_load_exc}[/]")
+
         # Estado proactivo al arranque (especialmente para usuario existente).
         try:
             proactive_status = await agent.build_startup_status_markdown(profile_changes=profile_changes)

@@ -210,6 +210,19 @@ def _seconds_to_hhmmss(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def _is_cycling_activity(act_type) -> bool:
+    """True para cualquier variante de ciclismo (mountain bike, carretera, indoor, virtual, etc.)."""
+    if isinstance(act_type, dict):
+        act_type = str(act_type.get("typeKey") or act_type.get("typeName") or "")
+    t = str(act_type or "").lower()
+    return any(kw in t for kw in ("cycling", "biking", "bike", "virtual_ride", "bmx", "cicl"))
+
+
+# Versión de la fórmula TSS. Incrementar cuando cambie _estimate_session_tss
+# para forzar recálculo automático de la serie histórica en el próximo arranque.
+_TSS_FORMULA_VERSION = 3  # v3: enrichment de actividades recientes con get_activity (trainingStressScore)
+
+
 # Metadatos de récords personales de Garmin (mapeado de typeId a categoría y formato)
 _PR_METADATA = {
     1: {"tipo": "1K", "unidad": "tiempo"},
@@ -382,10 +395,24 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
                     dist_km = float(distance) / 1000
                     data["distance_km"] = round(dist_km, 2)
                     if dur_s and dist_km > 0:
-                        pace_s_per_km = dur_s / dist_km
-                        pace_min = int(pace_s_per_km // 60)
-                        pace_sec = int(pace_s_per_km % 60)
-                        data["ritmo_medio_min_km"] = f"{pace_min}:{pace_sec:02d} min/km"
+                        act_type_raw = data.get("activityType") or data.get("type") or ""
+                        if _is_cycling_activity(act_type_raw):
+                            speed_kmh = dist_km / (dur_s / 3600)
+                            data["velocidad_media_kmh"] = round(speed_kmh, 1)
+                            # Convertir velocidad máxima si viene en m/s
+                            max_spd = data.get("maxSpeed") or data.get("max_speed_ms")
+                            if max_spd is not None:
+                                try:
+                                    ms = float(max_spd)
+                                    # Garmin devuelve maxSpeed en m/s
+                                    data["velocidad_maxima_kmh"] = round(ms * 3.6, 1)
+                                except (ValueError, TypeError):
+                                    pass
+                        else:
+                            pace_s_per_km = dur_s / dist_km
+                            pace_min = int(pace_s_per_km // 60)
+                            pace_sec = int(pace_s_per_km % 60)
+                            data["ritmo_medio_min_km"] = f"{pace_min}:{pace_sec:02d} min/km"
             except (ValueError, TypeError):
                 pass
             # Calcular zonas de FC estimadas (necesita FCmax y FCmedia)
@@ -852,39 +879,54 @@ def _extract_training_load_points(payload: Any) -> list[dict]:
     return points
 
 
-def _estimate_session_tss(activity: dict) -> float:
-    """Estima TSS de una sesión con cuatro niveles de prioridad:
+def _estimate_session_tss(activity: dict, ftp: float | None = None) -> tuple[float, str]:
+    """Estima TSS de una sesión. Devuelve (valor, etiqueta) donde:
+      etiqueta = "TSS"   si la fuente es potenciómetro o dato nativo de Garmin.
+      etiqueta = "hrTSS" si la fuente es estimación por FC o genérico.
 
-    1. Training Load de Garmin  — más preciso (usa FC, potencia y cadencia del reloj).
-    2. FC media de la sesión    — estimación por método Karvonen (%HRR → IF → TSS).
-    3. Training Effect aeróbico — escala 0-5 mapeada a IF cuando no hay FC.
-    4. IF genérico 0.68         — último recurso si no hay ningún dato de intensidad.
+    Prioridades:
+    1.  trainingStressScore / Training Load de Garmin  (más preciso)
+    1.5 Potencia (NP o avgPower) + FTP  — solo ciclismo
+    2.  FC media  — Ciclismo: IF=%HRR (Coggan)  /  Running: IF=0.40+HRR×0.65
+    3.  Training Effect aeróbico
+    4.  IF genérico por deporte
     """
     if not isinstance(activity, dict):
-        return 0.0
+        return 0.0, "hrTSS"
+
+    # Detectar ciclismo para aplicar la fórmula IF correcta
+    _act_type = activity.get("type") or activity.get("activityType") or ""
+    _cycling = _is_cycling_activity(_act_type)
 
     # ── Prioridad 1: Training Load de Garmin ─────────────────────────────────
+    # Nota: se omiten valores <= 0 para permitir el fallback por FC cuando Garmin
+    # no calculó el training load (activityTrainingLoad=0 significa "sin dato").
     for key in (
+        "trainingStressScore",    # TSS nativo (potencia / cycling)
         "trainingLoad",
         "training_load",
-        "load",
+        "activityTrainingLoad",   # Training Load interno de Garmin (TE)
         "loadValue",
-        "activityTrainingLoad",
     ):
         raw_load = activity.get(key)
         if raw_load is None:
             continue
         try:
-            return max(0.0, min(float(raw_load), 500.0))
+            val = float(raw_load)
         except Exception:
             continue
+        if val <= 0:
+            continue   # 0 = Garmin no lo calculó → caer al fallback de FC
+        return max(0.0, min(val, 500.0)), "TSS"
 
     # ── Duración — necesaria para todas las estimaciones restantes ────────────
     duration_seconds = (
-        activity.get("duration")
+        activity.get("duration_seconds")      # garmin-mcp (snake_case)
+        or activity.get("duration")
         or activity.get("durationInSeconds")
         or activity.get("elapsedDuration")
         or activity.get("movingDuration")
+        or activity.get("moving_duration_seconds")  # garmin-mcp fallback
         or 0
     )
     try:
@@ -892,9 +934,32 @@ def _estimate_session_tss(activity: dict) -> float:
     except Exception:
         hours = 0.0
     if hours <= 0:
-        return 0.0
+        return 0.0, "hrTSS"
 
     if_value: float | None = None
+
+    # ── Prioridad 1.5: potencia + FTP (solo ciclismo, más preciso que FC) ─────────
+    # Usa Normalized Power si está disponible (mejor que avg para TSS),
+    # o Average Power como alternativa. Si no hay FTP conocido, pasa al fallback FC.
+    if _cycling and hours > 0:
+        power_raw = (
+            activity.get("normalizedPower")
+            or activity.get("normalized_power_watts")
+            or activity.get("avgPower")
+            or activity.get("avg_power_watts")
+            or activity.get("averagePower")
+            or activity.get("average_power_watts")
+        )
+        if power_raw is not None:
+            try:
+                power_w = float(power_raw)
+                if power_w > 0 and ftp and ftp > 0:
+                    if_pow = power_w / ftp
+                    tss_pow = hours * (if_pow ** 2) * 100.0
+                    return max(0.0, min(tss_pow, 500.0)), "TSS"
+            except (ValueError, TypeError):
+                pass
+    # (sin potencia o sin FTP → continuar hacia estimación por FC)
 
     # ── Prioridad 2: estimación por FC media (método Karvonen %HRR) ──────────
     # IF ≈ 0.40 + %HRR × 0.65  →  Z1(~45%HRR)≈0.69 · Z2(~65%)≈0.82 · Z4(~85%)≈0.95
@@ -921,7 +986,13 @@ def _estimate_session_tss(activity: dict) -> float:
             hrr = (avg_hr - hr_rest) / (hr_max - hr_rest)
             hrr = max(0.30, min(1.00, hrr))
 
-            if_value = max(0.50, min(1.05, 0.40 + hrr * 0.65))
+            if _cycling:
+                # Ciclismo: IF = %HRR  (Coggan hrTSS, equivalente a TrainingPeaks HR-based)
+                # Validado: 129bpm avg / 167bpm max / 2h33min → IF=0.675 → TSS≈116 (TP: 116 HR-based)
+                if_value = max(0.35, min(1.05, hrr))
+            else:
+                # Running/natación/otros: IF = 0.40 + %HRR × 0.65  (Karvonen-TRIMP)
+                if_value = max(0.50, min(1.05, 0.40 + hrr * 0.65))
         except Exception:
             if_value = None
 
@@ -939,12 +1010,12 @@ def _estimate_session_tss(activity: dict) -> float:
             except Exception:
                 if_value = None
 
-    # ── Prioridad 4: IF genérico (Z2 moderado) ───────────────────────────────
+    # ── Prioridad 4: IF genérico por deporte ─────────────────────────────────
     if if_value is None:
-        if_value = 0.68
+        if_value = 0.60 if _cycling else 0.68  # ciclismo Z2 ≈ 0.60, running Z2 ≈ 0.68
 
     tss = hours * (if_value ** 2) * 100.0
-    return max(0.0, min(tss, 500.0))
+    return max(0.0, min(tss, 500.0)), "hrTSS"
 
 
 def _percentile(values: list[float], pct: float, default: float = 0.0) -> float:
@@ -1084,7 +1155,7 @@ def _compute_load_fatigue_metrics(
             continue
         if d_obj < start_day or d_obj > today:
             continue
-        tss = _estimate_session_tss(act)
+        tss, _ = _estimate_session_tss(act)
         if tss > 0:
             tss_by_day[d_iso] = tss_by_day.get(d_iso, 0.0) + tss
 
@@ -1147,7 +1218,12 @@ def _compute_load_fatigue_metrics(
         chunk = last_42[idx: idx + 7]
         if chunk:
             weekly_tss_values.append(round(sum(float(x["tss"]) for x in chunk), 1))
-    current_week_tss = round(sum(float(x["tss"]) for x in series[-7:]), 1)
+    # Semana actual: lunes de esta semana → hoy (no los últimos 7 días del array)
+    _week_start_iso = (today - timedelta(days=today.weekday())).isoformat()
+    current_week_tss = round(
+        sum(float(x["tss"]) for x in series if (x.get("date") or "") >= _week_start_iso),
+        1,
+    )
 
     tsb_low = round(_percentile(tsb_values, float(model_cfg.get("tsb_low_pct") or 0.20), default=-10.0), 1)
     tsb_high = round(_percentile(tsb_values, float(model_cfg.get("tsb_high_pct") or 0.80), default=5.0), 1)
@@ -1324,18 +1400,18 @@ def _build_load_trend_table(series: list[dict], mode: str = "weeks") -> str:
             + "_TSS: carga de sesión · ATL: fatiga aguda (7d) · CTL: fitness crónico · TSB: forma (CTL−ATL)_"
         )
 
-    # Vista semanal: últimas 8 semanas
-    # Agrupamos en bloques de 7 días hacia atrás desde hoy
+    # Vista semanal: últimas 8 semanas naturales lunes→domingo
     today = date.today()
+    _week_mon = today - timedelta(days=today.weekday())  # lunes de esta semana
     weeks: list[tuple[str, str, list[dict]]] = []
     for w in range(7, -1, -1):
-        end_d = today - timedelta(days=w * 7)
-        start_d = end_d - timedelta(days=6)
+        mon = _week_mon - timedelta(weeks=w)
+        sun = mon + timedelta(days=6)
         week_rows = [
             r for r in sorted_series
-            if start_d.isoformat() <= str(r.get("date") or "") <= end_d.isoformat()
+            if mon.isoformat() <= str(r.get("date") or "") <= sun.isoformat()
         ]
-        weeks.append((start_d.isoformat(), end_d.isoformat(), week_rows))
+        weeks.append((mon.isoformat(), sun.isoformat(), week_rows))
 
     # Descartar semanas vacías al principio
     first_non_empty = next((i for i, (_, _, wr) in enumerate(weeks) if wr), 0)
@@ -3034,6 +3110,7 @@ def _build_activity_analysis_block(
     sleep_raw: str | None = None,
     hrv_raw: str | None = None,
     training_load_raw: str | None = None,
+    ftp: float | None = None,
 ) -> str:
     """Construye un bloque de análisis pre-computado en Python para inyectar al LLM.
 
@@ -3088,8 +3165,19 @@ def _build_activity_analysis_block(
     if dist_km:
         lines.append(f"Distancia: {dist_km:.2f} km")
     if dur_s and dist_km and dist_km > 0:
-        pace_s = dur_s / dist_km
-        lines.append(f"Ritmo medio: {int(pace_s//60)}:{int(pace_s%60):02d} min/km")
+        if _is_cycling_activity(act_type):
+            speed_kmh = dist_km / (dur_s / 3600)
+            lines.append(f"Velocidad media: {speed_kmh:.1f} km/h")
+            # Velocidad máxima (Garmin devuelve avgSpeed/maxSpeed en m/s)
+            max_spd_raw = act.get("maxSpeed") or act.get("max_speed_ms")
+            if max_spd_raw is not None:
+                try:
+                    lines.append(f"Velocidad maxima: {float(max_spd_raw) * 3.6:.1f} km/h")
+                except (ValueError, TypeError):
+                    pass
+        else:
+            pace_s = dur_s / dist_km
+            lines.append(f"Ritmo medio: {int(pace_s//60)}:{int(pace_s%60):02d} min/km")
     if avg_hr_f:
         lines.append(f"FC media: {avg_hr_f:.0f} bpm")
     if max_hr_f:
@@ -3102,6 +3190,10 @@ def _build_activity_analysis_block(
         lines.append(f"Desnivel negativo: {float(elev_loss):.0f} m")
     if calories:
         lines.append(f"Calorias: {float(calories):.0f} kcal")
+    # TSS o hrTSS calculado para este entrenamiento
+    _tss_val, _tss_lbl = _estimate_session_tss(act, ftp=ftp)
+    if _tss_val > 0:
+        lines.append(f"{_tss_lbl}: {_tss_val:.1f}")
 
     # ── Sección 2: Zonas de FC estimadas ──────────────────────────────────
     if avg_hr_f and max_hr_f and dur_s:
@@ -3452,14 +3544,16 @@ def _kairos_load_trends(profile: dict, metric: str, weeks_back: int = 8) -> str:
         return json.dumps({"error": f"Sin datos en las últimas {weeks_back} semanas.", "n": 0}, ensure_ascii=False)
     points = [{"date": r["date"], "value": round(float(r.get(metric, 0.0)), 1)} for r in filtered if r.get("date")]
     today = date.today()
+    # Semanas naturales lunes→domingo (no ventanas deslizantes)
+    _week_mon = today - timedelta(days=today.weekday())  # lunes de esta semana
     weekly = []
     for w in range(weeks_back - 1, -1, -1):
-        end_d = today - timedelta(days=w * 7)
-        start_d = end_d - timedelta(days=6)
-        wpts = [p for p in points if start_d.isoformat() <= p["date"] <= end_d.isoformat()]
+        mon = _week_mon - timedelta(weeks=w)
+        sun = mon + timedelta(days=6)
+        wpts = [p for p in points if mon.isoformat() <= p["date"] <= sun.isoformat()]
         if wpts:
             agg = round(sum(p["value"] for p in wpts), 1) if metric == "tss" else round(wpts[-1]["value"], 1)
-            weekly.append({"week": f"{start_d.strftime('%d/%m')}–{end_d.strftime('%d/%m')}", "value": agg})
+            weekly.append({"week": f"{mon.strftime('%d/%m')}–{sun.strftime('%d/%m')}", "value": agg})
     return json.dumps({
         "metric": metric, "n_days": len(points), "weeks_back": weeks_back,
         "latest": points[-1] if points else None,
@@ -3575,7 +3669,13 @@ _KAIROS_INTERNAL_TOOLS: list[dict] = [
         "type": "function",
         "function": {
             "name": "kairos_load_trends",
-            "description": "Devuelve la tendencia histórica de TSS, ATL, CTL o TSB del atleta (datos del perfil). Úsalo para preguntas sobre evolución de carga, fatiga o forma a lo largo del tiempo.",
+            "description": (
+                "Devuelve la serie diaria y semanal de TSS, ATL, CTL o TSB calculados desde el perfil. "
+                "ÚSALA como PRIMERA opción para CUALQUIER pregunta sobre carga, fatiga o forma: "
+                "'¿cuál fue mi TSS ayer?', '¿cuánto TSS llevo esta semana?', '¿cómo está mi ATL/CTL/TSB?', "
+                "'evolución de carga', '¿estoy en sobreentrenamiento?'. "
+                "IMPORTANTE: los endpoints de actividades Garmin NO devuelven TSS — esta tool es la única fuente."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -3689,6 +3789,14 @@ async def _fetch_activities_for_load_calc(
         "_fetch_activities_for_load_calc: %d actividades obtenidas [%s → %s]",
         len(result), start_date_iso, end_date_iso,
     )
+    # Diagnóstico de campos (DEBUG): útil para verificar compatibilidad con garmin-mcp
+    if result:
+        sample = result[0]
+        tss_fields  = {k: sample[k] for k in sample if any(x in k.lower() for x in ("load","tss","training","effect","stress"))}
+        dur_fields  = {k: sample[k] for k in sample if any(x in k.lower() for x in ("duration","elapsed","moving"))}
+        hr_fields   = {k: sample[k] for k in sample if any(x in k.lower() for x in ("hr","heart"))}
+        log.debug("sample activity keys: %s", list(sample.keys())[:30])
+        log.debug("sample tss_fields=%s  dur_fields=%s  hr_fields=%s", tss_fields, dur_fields, hr_fields)
     return result
 
 
@@ -3712,7 +3820,13 @@ def _build_load_fatigue_dict_from_series(series: list[dict], model_cfg: dict) ->
         chunk = last_42[idx:idx + 7]
         if chunk:
             weekly_tss_values.append(round(sum(float(x["tss"]) for x in chunk), 1))
-    current_week_tss = round(sum(float(x["tss"]) for x in series[-7:]), 1)
+    # Semana actual: lunes de esta semana → hoy (no los últimos 7 días del array)
+    _today_s = date.today()
+    _week_start_iso = (_today_s - timedelta(days=_today_s.weekday())).isoformat()
+    current_week_tss = round(
+        sum(float(x["tss"]) for x in series if (x.get("date") or "") >= _week_start_iso),
+        1,
+    )
 
     tsb_low  = round(_percentile(tsb_values, float(model_cfg.get("tsb_low_pct") or 0.20), default=-10.0), 1)
     tsb_high = round(_percentile(tsb_values, float(model_cfg.get("tsb_high_pct") or 0.80), default=5.0), 1)
@@ -3964,6 +4078,229 @@ class TrainerAgent:
 
         return result
 
+    async def compute_and_persist_load_metrics(self, force_full_recalc: bool = False) -> None:
+        """Calcula TSS/ATL/CTL/TSB de forma incremental y los persiste en load_metrics_daily.
+
+        Flujo:
+        1. Lee la serie existente de DB (últimos 120 días).
+        2. Si ya está al día, recarga el perfil y sale.
+        3. Obtiene actividades de Garmin solo para los días nuevos (incremental).
+        4. Calcula TSS día a día y re-corre el EWMA sembrando desde el último registro.
+        5. Persiste las nuevas filas en DB (upsert).
+        6. Actualiza self.user_profile["load_metrics"] con la serie completa.
+        """
+        from datetime import date as _date, timedelta
+
+        today = _date.today()
+        full_window_days = 120
+        full_start = today - timedelta(days=full_window_days)
+
+        # 1. Datos existentes en DB
+        existing_series = _storage.get_load_metrics_series(days=full_window_days)
+        last_date_str   = _storage.get_load_metrics_last_date()
+
+        if not force_full_recalc and last_date_str:
+            try:
+                last_d = _date.fromisoformat(last_date_str)
+            except Exception:
+                last_d = None
+            if last_d and last_d >= today:
+                # Auto-detectar serie corrupta: si tenemos suficientes días en DB pero
+                # todos los CTL son 0, los datos fueron guardados con el bug del TSS=0.
+                # En ese caso forzamos recálculo completo.
+                stale_zeros = (
+                    len(existing_series) > 5
+                    and all(float(row.get("ctl") or 0) <= 0.01 for row in existing_series)
+                )
+                saved_formula_v = int(
+                    (self.user_profile.get("load_metrics") or {}).get("formula_version") or 0
+                )
+                formula_changed = saved_formula_v != _TSS_FORMULA_VERSION
+                if stale_zeros or formula_changed:
+                    reason = "CTL=0" if stale_zeros else f"fórmula v{saved_formula_v}→v{_TSS_FORMULA_VERSION}"
+                    log.info(
+                        "compute_load: recalculando serie completa (%s)",
+                        reason,
+                    )
+                    fetch_from = full_start.isoformat()
+                else:
+                    log.info("compute_load: ya actualizado (último=%s) — recargando perfil", last_date_str)
+                    self._apply_series_to_profile(existing_series, today)
+                    return
+            else:
+                fetch_from = ((last_d + timedelta(days=1)) if last_d else full_start).isoformat()
+        else:
+            fetch_from = full_start.isoformat()
+            log.info("compute_load: cálculo completo desde %s", fetch_from)
+
+        log.info("compute_load: fetch incremental desde %s", fetch_from)
+
+        # 2. FTP de ciclismo: intentar desde perfil cacheado o desde Garmin
+        cycling_ftp: float | None = None
+        try:
+            cycling_ftp = float(
+                (self.user_profile.get("performance") or {}).get("cycling_ftp") or 0
+            ) or None
+        except (ValueError, TypeError):
+            cycling_ftp = None
+        if not cycling_ftp:
+            try:
+                raw_ftp = await call_tool(self.mcp_session, "get_cycling_ftp", {})
+                if raw_ftp and raw_ftp.strip():
+                    ftp_data = json.loads(raw_ftp) if raw_ftp.strip()[0] in ("{", "[") else {}
+                    if isinstance(ftp_data, list) and ftp_data:
+                        ftp_data = ftp_data[0]
+                    if isinstance(ftp_data, dict):
+                        ftp_val = (
+                            ftp_data.get("cyclingFtp")
+                            or ftp_data.get("ftp")
+                            or ftp_data.get("functionalThresholdPower")
+                            or ftp_data.get("functional_threshold_power")
+                        )
+                        if ftp_val:
+                            cycling_ftp = round(float(ftp_val), 1)
+            except Exception:
+                pass
+        if cycling_ftp:
+            log.info("compute_load: FTP ciclismo=%.0f W (usado para TSS por potencia)", cycling_ftp)
+            # Cachear en perfil para el próximo arranque
+            perf = self.user_profile.setdefault("performance", {})
+            perf["cycling_ftp"] = cycling_ftp
+            perf["cycling_ftp_date"] = today.isoformat()
+        else:
+            log.info("compute_load: FTP ciclismo no disponible — usando estimación por FC")
+
+        # 3. Obtener actividades nuevas usando la función paginada probada
+        new_activities = await _fetch_activities_for_load_calc(
+            self.mcp_session, fetch_from, today.isoformat()
+        )
+
+        # 3b. Enriquecer actividades recientes (últimos 14 días) con detalle de get_activity
+        # para obtener trainingStressScore (TSS nativo por potenciómetro) y campos de potencia.
+        # Esto garantiza que Priority 1 use el TSS de Garmin cuando está disponible.
+        _ENRICH_DAYS = 14
+        _enrich_cutoff = (today - timedelta(days=_ENRICH_DAYS)).isoformat()
+        _recent = [a for a in new_activities
+                   if (_extract_activity_date_iso(a) or "") >= _enrich_cutoff]
+        if _recent:
+            log.info(
+                "compute_load: enriqueciendo %d actividades recientes con detalle (trainingStressScore/potencia)",
+                len(_recent),
+            )
+            for _act in _recent:
+                _act_id = _act.get("id") or _act.get("activityId")
+                if not _act_id:
+                    continue
+                try:
+                    _raw_d = await call_tool(
+                        self.mcp_session, "get_activity", {"activityId": str(_act_id)}
+                    )
+                    if _raw_d and _raw_d.strip():
+                        _detail = json.loads(_raw_d) if _raw_d.strip()[0] in ("{", "[") else {}
+                        if isinstance(_detail, dict):
+                            for _k in (
+                                "trainingStressScore",
+                                "normalizedPower", "normalizedPowerWatts",
+                                "avgPower", "averagePower", "avg_power_watts",
+                                "activityTrainingLoad",
+                            ):
+                                if _detail.get(_k) is not None:
+                                    _act[_k] = _detail[_k]
+                except Exception:
+                    pass
+
+        # 4. TSS por día para las actividades nuevas
+        tss_by_day:   dict[str, float] = {}
+        count_by_day: dict[str, int]   = {}
+        for act in new_activities:
+            d_iso = _extract_activity_date_iso(act)
+            if not d_iso:
+                continue
+            tss, _ = _estimate_session_tss(act, ftp=cycling_ftp)
+            if tss > 0:
+                tss_by_day[d_iso]   = tss_by_day.get(d_iso, 0.0) + tss
+                count_by_day[d_iso] = count_by_day.get(d_iso, 0) + 1
+
+        log.info("compute_load: %d días con TSS desde %s (actividades=%d)",
+                 len(tss_by_day), fetch_from, len(new_activities))
+
+        # 6. Configuración de tau por deporte
+        model_cfg = _resolve_sport_model_cfg(self.user_profile)
+        tau_atl   = max(3,  min(int(round(float(model_cfg.get("atl_tau_days") or 7))), 14))
+        tau_ctl   = max(21, min(int(round(float(model_cfg.get("ctl_tau_days") or 42))), 90))
+        alpha_atl = 1.0 / float(tau_atl)
+        alpha_ctl = 1.0 / float(tau_ctl)
+
+        # 7. Semilla: último valor de ATL/CTL en DB antes del rango a calcular
+        atl_prev = 0.0
+        ctl_prev = 0.0
+        if existing_series:
+            for row in sorted(existing_series, key=lambda x: x["date"], reverse=True):
+                if row["date"] < fetch_from:
+                    atl_prev = float(row.get("atl") or 0.0)
+                    ctl_prev = float(row.get("ctl") or 0.0)
+                    log.info("compute_load: semilla ATL=%.1f CTL=%.1f desde %s", atl_prev, ctl_prev, row["date"])
+                    break
+
+        # 8. EWMA día a día para el rango nuevo
+        new_rows: list[dict] = []
+        day_cursor = _date.fromisoformat(fetch_from)
+        while day_cursor <= today:
+            d_iso = day_cursor.isoformat()
+            tss   = max(0.0, float(tss_by_day.get(d_iso, 0.0)))
+            atl   = atl_prev + (tss - atl_prev) * alpha_atl
+            ctl   = ctl_prev + (tss - ctl_prev) * alpha_ctl
+            tsb   = ctl - atl
+            new_rows.append({
+                "date": d_iso,
+                "tss":  round(tss, 2),
+                "atl":  round(atl, 2),
+                "ctl":  round(ctl, 2),
+                "tsb":  round(tsb, 2),
+                "activities_count": count_by_day.get(d_iso, 0),
+            })
+            atl_prev = atl
+            ctl_prev = ctl
+            day_cursor += timedelta(days=1)
+
+        # 9. Persistir en DB
+        _storage.upsert_load_metrics_series(new_rows)
+
+        # 10. Recargar serie completa de DB y actualizar perfil
+        full_series = _storage.get_load_metrics_series(days=full_window_days)
+        self._apply_series_to_profile(full_series, today)
+        log.info("compute_load: serie de %d días lista (hoy: TSS=%.1f ATL=%.1f CTL=%.1f TSB=%.1f)",
+                 len(full_series),
+                 float((full_series[-1] if full_series else {}).get("tss", 0)),
+                 float((full_series[-1] if full_series else {}).get("atl", 0)),
+                 float((full_series[-1] if full_series else {}).get("ctl", 0)),
+                 float((full_series[-1] if full_series else {}).get("tsb", 0)))
+
+    def _apply_series_to_profile(self, series: list[dict], today) -> None:
+        """Actualiza self.user_profile["load_metrics"] con la serie dada y la guarda."""
+        if not isinstance(self.user_profile, dict):
+            return
+        model_cfg = _resolve_sport_model_cfg(self.user_profile)
+        model_cfg["_sport"] = str(
+            ((self.user_profile.get("goals") or {}).get("primary") or "running")
+        ).strip().lower()
+        load_fatigue = _build_load_fatigue_dict_from_series(series, model_cfg)
+        if not load_fatigue:
+            return
+        self.user_profile["load_metrics"] = {
+            "model":           load_fatigue.get("model") or {},
+            "last":            {**(load_fatigue.get("latest") or {}), "date": today.isoformat()},
+            "ranges":          load_fatigue.get("ranges") or {},
+            "weekly":          load_fatigue.get("weekly") or {},
+            "series":          load_fatigue.get("series") or [],
+            "formula_version": _TSS_FORMULA_VERSION,
+            "updated_at":      datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            _save_user_profile(self.user_profile)
+        except Exception:
+            pass
+
     async def collect_startup_snapshot_48h(self) -> dict:
         """Recoge un snapshot operativo de 48h para briefing de arranque."""
         today_iso = date.today().isoformat()
@@ -4096,6 +4433,23 @@ class TrainerAgent:
             profile=getattr(self, "user_profile", {}) if hasattr(self, "user_profile") else {},
             days_window=load_window_days,
         )
+
+        # ── Fallback: usar métricas precalculadas del perfil (de compute_and_persist) ──
+        # compute_and_persist_load_metrics se ejecuta antes en main.py y deja
+        # user_profile["load_metrics"] actualizado. Si la descarga de actividades
+        # falla aquí, leemos esa caché en lugar de mostrar zeros.
+        if load_fatigue is None:
+            cached_lm = (getattr(self, "user_profile", None) or {}).get("load_metrics") or {}
+            cached_series = cached_lm.get("series") or []
+            if cached_series:
+                model_cfg = _resolve_sport_model_cfg(getattr(self, "user_profile", {}))
+                model_cfg["_sport"] = str(
+                    ((self.user_profile.get("goals") or {}).get("primary") or "running")
+                ).strip().lower()
+                load_fatigue = _build_load_fatigue_dict_from_series(cached_series, model_cfg)
+                if load_fatigue:
+                    _load_debug = "usando métricas cacheadas de DB (cálculo incremental previo)"
+                    log.info("collect_startup: cargadas métricas cacheadas (%d días)", len(cached_series))
 
         if isinstance(getattr(self, "user_profile", None), dict) and load_fatigue:
             self.user_profile["load_metrics"] = {
@@ -4472,6 +4826,7 @@ class TrainerAgent:
                     sleep_raw=next((p for p in context_parts if "SUENO" in p), None),
                     hrv_raw=next((p for p in context_parts if "HRV" in p), None),
                     training_load_raw=next((p for p in context_parts if "CARGA" in p), None),
+                    ftp=float((self.user_profile.get("performance") or {}).get("cycling_ftp") or 0) or None,
                 )
 
                 # Eliminar del array de mensajes cualquier respuesta previa del asistente
@@ -4508,7 +4863,10 @@ class TrainerAgent:
                         "FORMATO: Cada item de lista en su propia linea con '- ' o '* '. "
                         "NUNCA pongas varios items en la misma linea. "
                         "PROHIBIDO: velocidad en m/s, duracion en segundos, floats crudos (ej: 313.53961181640625). "
-                        "USA los valores ya calculados del bloque (ritmo min/km, HH:MM:SS, %.1f)."
+                        "USA los valores ya calculados del bloque: "
+                        "ciclismo → velocidad en km/h (campo velocidad_media_kmh / velocidad_maxima_kmh); "
+                        "running → ritmo en min/km (campo ritmo_medio_min_km); "
+                        "duracion en HH:MM:SS, distancia en km."
                     ),
                 })
             else:

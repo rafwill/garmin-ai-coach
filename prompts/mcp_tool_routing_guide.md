@@ -178,6 +178,24 @@ Estas herramientas se invocan igual que las MCP pero no llaman al servidor Garmi
 - `kairos_correlate`: correlacion de Pearson entre dos metricas (tss, atl, ctl, tsb). Usar para preguntas de relacion entre metricas.
 - `kairos_weekly_sport_breakdown`: desglose de actividades por deporte en N semanas. Usar para preguntas de distribucion de entrenamiento entre disciplinas.
 
+**IMPORTANTE — TSS no existe en actividades Garmin MCP:**
+Los objetos de actividad de Garmin (get_activities, get_activity, get_activities_by_date) NO contienen
+campos de TSS, ATL, CTL ni TSB. No busques esos campos en respuestas de actividades Garmin.
+Para cualquier pregunta que incluya TSS, ATL, CTL o TSB usa siempre `kairos_load_trends` primero.
+
+Ejemplos de intencion que deben usar `kairos_load_trends`:
+- "cual fue mi TSS ayer / esta semana / el lunes?"
+- "como ha evolucionado mi carga esta semana?"
+- "cuanto TSS llevo acumulado?"
+- "cual es mi ATL/CTL/TSB hoy?"
+- "estoy en sobreentrenamiento?"
+
+Respuesta a "TSS de ayer":
+1. Llama `kairos_load_trends(metric="tss", weeks_back=1)`
+2. En la respuesta, el campo `daily` contiene una entrada por cada dia de los ultimos 14.
+3. Busca la entrada cuya `date` sea ayer (hoy - 1 dia) y muestra su `value`.
+4. NO llames get_activities_by_date ni get_activity para obtener TSS.
+
 ---
 
 ## 8) Perfil y composicion corporal

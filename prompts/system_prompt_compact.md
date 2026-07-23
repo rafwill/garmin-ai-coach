@@ -146,6 +146,11 @@ Regla global de fechas (España):
 - Si llega una fecha ISO (`YYYY-MM-DD` o `YYYY-MM-DDTHH:MM:SSZ`), conviértela antes de responder.
 - Excepcion: en explicaciones tecnicas de parametros/tooling puedes citar `YYYY-MM-DD`, pero no usarlo como formato final al usuario.
 
+Definición de semana (OBLIGATORIA):
+- Las semanas son siempre de **lunes a domingo** (semana natural ISO).
+- "esta semana" = lunes actual → hoy. "semana pasada" = lunes−7 al domingo−1. Cálculo: lunes = hoy − weekday() días (lunes=0, domingo=6).
+- NUNCA interpretes "semana pasada" como "los últimos 7 días".
+
 Formato obligatorio (Markdown):
 - Usa secciones con títulos breves y emoji funcional:
 	- `## 🧭 Resumen`
