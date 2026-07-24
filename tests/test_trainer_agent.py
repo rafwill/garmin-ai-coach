@@ -1420,60 +1420,66 @@ class TestLoadFatigueModel:
     def test_estimate_tss_priority1_uses_garmin_training_load(self):
         """Si la actividad tiene trainingLoad, se usa directamente."""
         act = {"trainingLoad": 95.0, "averageHR": 155, "duration": 3600}
-        assert _estimate_session_tss(act) == 95.0
+        tss, label = _estimate_session_tss(act)
+        assert tss == 95.0
+        assert label == "TSS"
 
     def test_estimate_tss_priority1_clamps_to_500(self):
         act = {"trainingLoad": 999.0}
-        assert _estimate_session_tss(act) == 500.0
+        tss, _ = _estimate_session_tss(act)
+        assert tss == 500.0
 
     def test_estimate_tss_priority2_hr_based_z2(self):
         """Sin trainingLoad, Z2 (avg_hr ~140, hr_rest 50, hr_max 185) → TSS razonable."""
         act = {"averageHR": 140, "maxHR": 185, "duration": 3600}
-        tss = _estimate_session_tss(act)
+        tss, _ = _estimate_session_tss(act)
         # Z2 1h → esperamos entre 50 y 80 TSS
         assert 50 <= tss <= 80, f"TSS Z2 1h inesperado: {tss}"
 
     def test_estimate_tss_priority2_hr_based_z4_higher_than_z2(self):
         """Z4 debe producir más TSS que Z2 para la misma duración."""
-        z2 = _estimate_session_tss({"averageHR": 140, "maxHR": 185, "duration": 3600})
-        z4 = _estimate_session_tss({"averageHR": 165, "maxHR": 185, "duration": 3600})
+        z2, _ = _estimate_session_tss({"averageHR": 140, "maxHR": 185, "duration": 3600})
+        z4, _ = _estimate_session_tss({"averageHR": 165, "maxHR": 185, "duration": 3600})
         assert z4 > z2
 
     def test_estimate_tss_priority2_uses_max_hr_from_activity(self):
         """max_hr de la actividad se usa como referencia; si no, se asume 185."""
-        with_max = _estimate_session_tss({"averageHR": 150, "maxHR": 175, "duration": 3600})
-        without_max = _estimate_session_tss({"averageHR": 150, "duration": 3600})
+        with_max, _ = _estimate_session_tss({"averageHR": 150, "maxHR": 175, "duration": 3600})
+        without_max, _ = _estimate_session_tss({"averageHR": 150, "duration": 3600})
         # Con max_hr real del reloj (175) vs estimado (185): la %HRR difiere → TSS difiere
         assert with_max != without_max
 
     def test_estimate_tss_priority3_training_effect_fallback(self):
         """Sin HR ni trainingLoad, usa Training Effect aeróbico."""
         act = {"aerobicTrainingEffect": 3.0, "duration": 3600}
-        tss = _estimate_session_tss(act)
+        tss, _ = _estimate_session_tss(act)
         # TE 3.0 → IF ~0.77 → 1h → ~59 TSS
         assert 45 <= tss <= 75, f"TSS con TE=3.0 inesperado: {tss}"
 
     def test_estimate_tss_priority4_default_if_no_data(self):
         """Sin ningún dato de intensidad, usa IF=0.68 → 1h → ~46 TSS."""
         act = {"duration": 3600}
-        tss = _estimate_session_tss(act)
+        tss, _ = _estimate_session_tss(act)
         expected = 0.68 ** 2 * 100
         assert abs(tss - expected) < 1.0
 
     def test_estimate_tss_zero_duration_returns_zero(self):
         act = {"averageHR": 145, "duration": 0}
-        assert _estimate_session_tss(act) == 0.0
+        tss, _ = _estimate_session_tss(act)
+        assert tss == 0.0
 
     def test_estimate_tss_invalid_activity_returns_zero(self):
-        assert _estimate_session_tss(None) == 0.0
-        assert _estimate_session_tss("not a dict") == 0.0
+        tss1, _ = _estimate_session_tss(None)
+        tss2, _ = _estimate_session_tss("not a dict")
+        assert tss1 == 0.0
+        assert tss2 == 0.0
 
     def test_estimate_tss_double_session_same_day_accumulates(self):
         """Dos sesiones en el mismo día deben sumar sus TSS en el modelo."""
         morning = {"averageHR": 145, "maxHR": 185, "duration": 3600}
         afternoon = {"trainingLoad": 80.0}
-        tss_morning = _estimate_session_tss(morning)
-        tss_afternoon = _estimate_session_tss(afternoon)
+        tss_morning, _ = _estimate_session_tss(morning)
+        tss_afternoon, _ = _estimate_session_tss(afternoon)
         # Ambas > 0 y distintas, y el modelo las sumará en tss_by_day
         assert tss_morning > 0 and tss_afternoon > 0
         assert tss_morning != tss_afternoon
