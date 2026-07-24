@@ -3164,22 +3164,55 @@ async def _find_activity_id_by_name(mcp_session: ClientSession, name_hint: str) 
     return None
 
 
-def _parse_hr_zones_list(raw: str | None) -> list[dict] | None:
-    """Parsea la respuesta de get_activity_hr_zones en una lista normalizada de zonas.
-
-    Maneja todos los formatos conocidos de la API de Garmin/garmin-mcp:
-    - Array directo: [{zoneNumber, secsInZone, minHeartRateIn, ...}]
-    - Objeto envuelto: {heartRateZones: [...]} / {hrTimeInZones: [...]} / etc.
-    - Variantes de campo: zoneLow/zoneHigh en lugar de minHeartRateIn/maxHeartRateIn
-    - Variantes de tiempo: secsInZone / timeInZone / time_in_zone (segundos)
-    - percentInZone como alternativa a secsInZone cuando no hay duración total
-
-    Devuelve lista de dicts normalizados o None si no hay datos utilizables.
+def _find_hr_zones_in_json(data: Any) -> list[dict] | None:
+    """Busca recursivamente datos de zonas de FC en cualquier nivel del JSON.
+    
+    Detecta arrays con objetos que tengan secsInZone > 0 y zoneNumber.
+    Cubre el caso donde Garmin devuelve los datos en campos anidados.
     """
+    if isinstance(data, list):
+        # Comprobar si esta lista ES la lista de zonas
+        zone_like = [
+            x for x in data
+            if isinstance(x, dict) and (
+                x.get("zoneNumber") is not None or x.get("zone_number") is not None
+            )
+        ]
+        if zone_like and len(zone_like) >= 3:
+            return zone_like
+        # Buscar en los elementos de la lista
+        for item in data:
+            result = _find_hr_zones_in_json(item)
+            if result:
+                return result
+
+    elif isinstance(data, dict):
+        # Revisar primero las claves más probables
+        for key in (
+            "heartRateTimeInZone", "heartRateZones", "hrTimeInZones",
+            "timeInHeartRateZones", "heartRateTimeInZones", "hrZones",
+            "zones", "hr_zones", "timeInZone", "timeInZones",
+        ):
+            val = data.get(key)
+            if isinstance(val, list) and len(val) >= 3:
+                result = _find_hr_zones_in_json(val)
+                if result:
+                    return result
+        # Búsqueda en profundidad en todos los valores
+        for val in data.values():
+            if isinstance(val, (dict, list)):
+                result = _find_hr_zones_in_json(val)
+                if result:
+                    return result
+
+    return None
+
+
+def _parse_hr_zones_list(raw: str | None) -> list[dict] | None:
+    """Parsea la respuesta de get_activity_hr_zones en una lista normalizada de zonas."""
     if not raw or not raw.strip():
         return None
     stripped = raw.strip()
-    # Filtrar respuestas vacías o de error
     if stripped in ("null", "[]", "{}", "(sin datos)"):
         return None
     try:
@@ -3187,23 +3220,8 @@ def _parse_hr_zones_list(raw: str | None) -> list[dict] | None:
     except json.JSONDecodeError:
         return None
 
-    # Extraer lista de zonas desde múltiples estructuras posibles
-    zones_raw: list = []
-    if isinstance(data, list):
-        zones_raw = data
-    elif isinstance(data, dict):
-        for key in (
-            "heartRateZones", "hrTimeInZones", "timeInHeartRateZones",
-            "heartRateTimeInZones", "zones", "hr_zones", "hrZones",
-        ):
-            val = data.get(key)
-            if isinstance(val, list) and val:
-                zones_raw = val
-                break
-        # Si no hay lista anidada pero el propio dict tiene zoneNumber, es un único objeto
-        if not zones_raw and data.get("zoneNumber") is not None:
-            zones_raw = [data]
-
+    # Búsqueda recursiva: encontrar la lista de zonas dondequiera que esté
+    zones_raw = _find_hr_zones_in_json(data)
     if not zones_raw:
         return None
 
@@ -5030,26 +5048,54 @@ class TrainerAgent:
                 except Exception as e:
                     log.debug(f"training_load error: {e}")
 
-                # Zonas reales de FC de la actividad
+                # ── Zonas reales de FC ──────────────────────────────────────────────
+                # Estrategia 1: buscar en el raw de get_activity (ya disponible, sin llamada extra)
+                raw_hr_zones = None
                 try:
-                    raw_hr_zones = await call_tool(
-                        self.mcp_session, "get_activity_hr_zones", {"activity_id": pre_id}
-                    )
-                    # Si falla, intentar con el nombre camelCase del parámetro
-                    if not raw_hr_zones or raw_hr_zones.strip() in ("null", "[]", "{}", "(sin datos)"):
-                        raw_hr_zones = await call_tool(
-                            self.mcp_session, "get_activity_hr_zones", {"activityId": pre_id}
-                        )
-                    log.info("hr_zones(%s): %s", pre_id, (raw_hr_zones or "")[:300])
-                    if raw_hr_zones and raw_hr_zones.strip() and raw_hr_zones.strip() not in ("null","[]","{}","(sin datos)"):
-                        context_parts.append(f"ZONAS FC (datos reales):\n{raw_hr_zones}")
-                except Exception as e:
-                    raw_hr_zones = None
-                    log.info("hr_zones error: %s", e)
+                    _act_data = json.loads(raw_pre) if raw_pre else {}
+                    _zones_in_act = _find_hr_zones_in_json(_act_data)
+                    if _zones_in_act:
+                        raw_hr_zones = json.dumps(_zones_in_act)
+                        log.info("hr_zones: encontradas %d zonas en get_activity", len(_zones_in_act))
+                except Exception:
+                    pass
 
-                # Si tenemos zonas reales, actualizar pre_data para que el LLM
-                # no use la estimación gaussiana (zonas_fc_estimadas) que viene
-                # del compact tool result de get_activity.
+                # Estrategia 2: llamar get_activity_hr_zones (herramienta específica)
+                if not raw_hr_zones:
+                    for _param in ({"activity_id": pre_id}, {"activityId": pre_id}, {"id": pre_id}):
+                        try:
+                            _raw = await call_tool(self.mcp_session, "get_activity_hr_zones", _param)
+                            log.info("get_activity_hr_zones(%s): %s", _param, (_raw or "")[:200])
+                            if _raw and _raw.strip() not in ("null", "[]", "{}", "(sin datos)", ""):
+                                _parsed = _parse_hr_zones_list(_raw)
+                                if _parsed:
+                                    raw_hr_zones = _raw
+                                    log.info("hr_zones: %d zonas via get_activity_hr_zones(%s)", len(_parsed), list(_param.keys())[0])
+                                    break
+                        except Exception as _e:
+                            log.info("get_activity_hr_zones(%s) error: %s", list(_param.keys())[0], _e)
+
+                # Estrategia 3: get_activity_hr_in_timezones (nombre alternativo en algunos servidores)
+                if not raw_hr_zones:
+                    for _param in ({"activity_id": pre_id}, {"activityId": pre_id}):
+                        try:
+                            _raw = await call_tool(self.mcp_session, "get_activity_hr_in_timezones", _param)
+                            log.info("get_activity_hr_in_timezones(%s): %s", _param, (_raw or "")[:200])
+                            if _raw and _raw.strip() not in ("null", "[]", "{}", "(sin datos)", ""):
+                                _parsed = _parse_hr_zones_list(_raw)
+                                if _parsed:
+                                    raw_hr_zones = _raw
+                                    log.info("hr_zones: %d zonas via get_activity_hr_in_timezones", len(_parsed))
+                                    break
+                        except Exception:
+                            pass
+
+                if raw_hr_zones:
+                    context_parts.append(f"ZONAS FC (datos reales):\n{raw_hr_zones}")
+                else:
+                    log.info("hr_zones: NO se encontraron datos reales de zonas — usando estimación gaussiana")
+
+                # Si tenemos zonas reales, actualizar pre_data para reemplazar estimación gaussiana
                 _zones_for_predata = _parse_hr_zones_list(raw_hr_zones)
                 if _zones_for_predata:
                     try:
@@ -5071,9 +5117,8 @@ class TrainerAgent:
                                 _pd["zonas_fc_reales_garmin"] = _zr
                                 _pd["nota_zonas"] = "Zonas reales de Garmin (Tiempo en Zonas del dispositivo)."
                             pre_data = json.dumps(_pd, ensure_ascii=False, separators=(",", ":"))
-                            # Actualizar context_parts[0] con los datos corregidos
                             context_parts[0] = f"ACTIVIDAD (activityId={pre_id}, fecha={user_date}):\n{pre_data}"
-                            log.info("pre_fetch: zonas_fc_reales_garmin inyectadas en pre_data (%d zonas)", len(_zones_for_predata))
+                            log.info("pre_data: zonas_fc_reales_garmin inyectadas (%d zonas)", len(_zones_for_predata))
                     except Exception as _ze:
                         log.debug("pre_data zone update error: %s", _ze)
 
