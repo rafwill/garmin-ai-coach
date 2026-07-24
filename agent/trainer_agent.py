@@ -413,6 +413,11 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
                             pace_min = int(pace_s_per_km // 60)
                             pace_sec = int(pace_s_per_km % 60)
                             data["ritmo_medio_min_km"] = f"{pace_min}:{pace_sec:02d} min/km"
+                # Eliminar campos de velocidad en m/s (confusos/irrelevantes):
+                # running usa ritmo_medio_min_km, ciclismo usa velocidad_media_kmh.
+                for _spd_k in ("avgSpeed", "averageSpeed", "maxSpeed", "minSpeed",
+                               "avg_speed", "average_speed", "max_speed", "avg_speed_ms", "max_speed_ms"):
+                    data.pop(_spd_k, None)
             except (ValueError, TypeError):
                 pass
             # Calcular zonas de FC estimadas (necesita FCmax y FCmedia)
@@ -4128,7 +4133,9 @@ class TrainerAgent:
                     self._apply_series_to_profile(existing_series, today)
                     return
             else:
-                fetch_from = ((last_d + timedelta(days=1)) if last_d else full_start).isoformat()
+                # Reprocessar desde el último día guardado (no last+1) para capturar
+                # actividades que llegaron después de la última ejecución del mismo día.
+                fetch_from = (last_d if last_d else full_start).isoformat()
         else:
             fetch_from = full_start.isoformat()
             log.info("compute_load: cálculo completo desde %s", fetch_from)
