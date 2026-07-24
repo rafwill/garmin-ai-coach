@@ -3278,6 +3278,22 @@ def _parse_hr_zones_list(raw: str | None) -> list[dict] | None:
     return normalized if normalized else None
 
 
+# Nombres de zonas FC de Garmin en español (zona número → nombre)
+_GARMIN_ZONE_NAMES_ES = {
+    1: "Calentamiento",
+    2: "Suave",
+    3: "Aeróbica",
+    4: "Umbral",
+    5: "Máximo",
+}
+
+
+def _hr_zone_bar(pct: float, width: int = 10) -> str:
+    """Barra visual █░ proporcional al porcentaje de zona de FC."""
+    filled = max(0, min(width, round(pct / 100 * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
 def _build_activity_analysis_block(
     activity_raw: str,
     body_battery_raw: str | None = None,
@@ -3385,7 +3401,8 @@ def _build_activity_analysis_block(
             lines.append("=== ZONAS DE FRECUENCIA CARDIACA (datos reales Garmin — Tiempo en Zonas) ===")
             if avg_hr_f and max_hr_f:
                 lines.append(f"FCmax: {max_hr_f:.0f} bpm | FC media: {avg_hr_f:.0f} bpm")
-            for z in sorted(_zones_parsed, key=lambda x: int(x.get("zoneNumber") or 0)):
+            _sorted_zp = sorted(_zones_parsed, key=lambda x: int(x.get("zoneNumber") or 0))
+            for _zi, z in enumerate(_sorted_zp):
                 _z_secs = float(z.get("secsInZone") or 0)
                 _z_pct_d = z.get("pctDirect")
                 if _total_secs > 0:
@@ -3399,10 +3416,22 @@ def _build_activity_analysis_block(
                 _z_num = int(z.get("zoneNumber") or 0)
                 _z_lo = z.get("minHeartRateIn") or "?"
                 _z_hi = z.get("maxHeartRateIn") or "?"
-                _z_name = z.get("zoneName") or f"Z{_z_num}"
-                _hr_range = f"{_z_lo}–{_z_hi} bpm" if _z_lo != "?" and _z_hi != "?" else ""
-                _suffix = f" ({_hr_range})" if _hr_range else ""
-                lines.append(f"  {_z_name} (Z{_z_num}){_suffix}: {_z_pct:.1f}%  (~{_z_mins:.0f} min)")
+                # Calcular límite alto desde la siguiente zona si no está disponible
+                if _z_hi == "?" and _z_lo != "?" and _zi + 1 < len(_sorted_zp):
+                    _next_lo = _sorted_zp[_zi + 1].get("minHeartRateIn") or "?"
+                    if _next_lo != "?":
+                        _z_hi = str(int(float(_next_lo)) - 1)
+                _z_name = (_GARMIN_ZONE_NAMES_ES.get(_z_num)
+                           if not z.get("zoneName") or str(z.get("zoneName")).startswith("Z")
+                           else z.get("zoneName"))
+                if _z_lo != "?" and _z_hi != "?":
+                    _hr_range = f"{_z_lo}–{_z_hi} bpm"
+                elif _z_lo != "?":
+                    _hr_range = f">{_z_lo} bpm"
+                else:
+                    _hr_range = ""
+                _bar = _hr_zone_bar(_z_pct)
+                lines.append(f"  Z{_z_num} {_z_name:<14} {_hr_range:<14} {_bar} {_z_pct:5.1f}%  (~{_z_mins:.0f} min)")
             _zones_shown = True
 
     if not _zones_shown and avg_hr_f and max_hr_f and dur_s:
@@ -5191,17 +5220,33 @@ class TrainerAgent:
                     # Garmin Connect divide por duración total de la actividad, no por suma de zonas
                     _zd_denom = _act_dur_s if _act_dur_s and _act_dur_s > 0 else _total_zd
                     if _total_zd > 0:
+                        _sorted_zd = sorted(_zones_for_predata, key=lambda x: int(x.get("zoneNumber") or 0))
                         _zdlines = []
-                        for _z in sorted(_zones_for_predata, key=lambda x: int(x.get("zoneNumber") or 0)):
+                        for _zdi, _z in enumerate(_sorted_zd):
                             _zn = int(_z.get("zoneNumber") or 0)
                             _zs = float(_z.get("secsInZone") or 0)
                             _pct = round(_zs / _zd_denom * 100, 1)
                             _mins = int(_zs / 60)
-                            _zname = _z.get("zoneName") or f"Z{_zn}"
+                            _zname = (_GARMIN_ZONE_NAMES_ES.get(_zn)
+                                      if not _z.get("zoneName") or str(_z.get("zoneName")).startswith("Z")
+                                      else _z.get("zoneName"))
                             _lo_d = _z.get("minHeartRateIn") or "?"
                             _hi_d = _z.get("maxHeartRateIn") or "?"
-                            _rng = f" ({_lo_d}-{_hi_d} bpm)" if _lo_d != "?" and _hi_d != "?" else ""
-                            _zdlines.append(f"• Z{_zn} {_zname}{_rng}: {_pct}% (~{_mins} min)")
+                            # Calcular límite alto desde la siguiente zona si no está disponible
+                            if _hi_d == "?" and _lo_d != "?" and _zdi + 1 < len(_sorted_zd):
+                                _next_lo = _sorted_zd[_zdi + 1].get("minHeartRateIn") or "?"
+                                if _next_lo != "?":
+                                    _hi_d = str(int(float(_next_lo)) - 1)
+                            if _lo_d != "?" and _hi_d != "?":
+                                _rng = f"{_lo_d}–{_hi_d} bpm"
+                            elif _lo_d != "?":
+                                _rng = f">{_lo_d} bpm"
+                            else:
+                                _rng = ""
+                            _bar = _hr_zone_bar(_pct)
+                            _zdlines.append(
+                                f"Z{_zn} · {_zname:<14} · {_rng:<14} {_bar} {_pct:5.1f}% (~{_mins} min)"
+                            )
                         _zones_direct_text = "\n".join(_zdlines)
 
                 _zones_override = (
