@@ -415,8 +415,16 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
                             data["ritmo_medio_min_km"] = f"{pace_min}:{pace_sec:02d} min/km"
                 # Eliminar campos de velocidad en m/s (confusos/irrelevantes):
                 # running usa ritmo_medio_min_km, ciclismo usa velocidad_media_kmh.
-                for _spd_k in ("avgSpeed", "averageSpeed", "maxSpeed", "minSpeed",
-                               "avg_speed", "average_speed", "max_speed", "avg_speed_ms", "max_speed_ms"):
+                # Cubrimos todos los alias posibles de garmin-mcp (camelCase y snake_case).
+                for _spd_k in (
+                    "avgSpeed", "averageSpeed", "maxSpeed", "minSpeed",
+                    "avg_speed", "average_speed", "max_speed", "min_speed",
+                    "avg_speed_ms", "max_speed_ms",
+                    "enhancedAvgSpeed", "enhancedMaxSpeed",
+                    "enhanced_avg_speed", "enhanced_max_speed",
+                    "movingSpeed", "moving_speed",
+                    "speed",
+                ):
                     data.pop(_spd_k, None)
                 # Potencia: para actividades de carrera (sin potenciómetro físico tipo Stryd)
                 # la potencia es una estimación interna de Garmin — se etiqueta como tal.
