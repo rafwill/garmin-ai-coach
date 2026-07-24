@@ -5047,6 +5047,36 @@ class TrainerAgent:
                     raw_hr_zones = None
                     log.info("hr_zones error: %s", e)
 
+                # Si tenemos zonas reales, actualizar pre_data para que el LLM
+                # no use la estimación gaussiana (zonas_fc_estimadas) que viene
+                # del compact tool result de get_activity.
+                _zones_for_predata = _parse_hr_zones_list(raw_hr_zones)
+                if _zones_for_predata:
+                    try:
+                        _pd = json.loads(pre_data)
+                        if isinstance(_pd, dict):
+                            _pd.pop("zonas_fc_estimadas", None)
+                            _pd.pop("nota_zonas", None)
+                            _total_z = sum(float(z.get("secsInZone") or 0) for z in _zones_for_predata)
+                            if _total_z > 0:
+                                _zr = {}
+                                for _z in sorted(_zones_for_predata, key=lambda x: int(x.get("zoneNumber") or 0)):
+                                    _zn = int(_z.get("zoneNumber") or 0)
+                                    _zs = float(_z.get("secsInZone") or 0)
+                                    _pct = round(_zs / _total_z * 100, 1)
+                                    _lo = _z.get("minHeartRateIn") or "?"
+                                    _hi = _z.get("maxHeartRateIn") or "?"
+                                    _zname = _z.get("zoneName") or f"Z{_zn}"
+                                    _zr[f"Z{_zn}_{_zname}_{_lo}-{_hi}bpm"] = f"{_pct:.1f}% (~{int(_zs/60)} min)"
+                                _pd["zonas_fc_reales_garmin"] = _zr
+                                _pd["nota_zonas"] = "Zonas reales de Garmin (Tiempo en Zonas del dispositivo)."
+                            pre_data = json.dumps(_pd, ensure_ascii=False, separators=(",", ":"))
+                            # Actualizar context_parts[0] con los datos corregidos
+                            context_parts[0] = f"ACTIVIDAD (activityId={pre_id}, fecha={user_date}):\n{pre_data}"
+                            log.info("pre_fetch: zonas_fc_reales_garmin inyectadas en pre_data (%d zonas)", len(_zones_for_predata))
+                    except Exception as _ze:
+                        log.debug("pre_data zone update error: %s", _ze)
+
                 # Construir bloque de análisis pre-computado en Python
                 analysis_block = _build_activity_analysis_block(
                     activity_raw=raw_pre,
@@ -5099,13 +5129,15 @@ class TrainerAgent:
                         "## \U0001f6cc Estado pre-carrera (body battery y sueno si disponibles)\n"
                         "## \U0001f504 Plan de recuperacion post-actividad\n"
                         "## \U0001f3af Recomendaciones para la proxima edicion\n\n"
+                        "ZONAS DE FC \u2014 REGLA CRITICA: "
+                        "Si el bloque === ZONAS... (datos reales Garmin) === existe, usa ESOS datos. "
+                        "Si 'zonas_fc_reales_garmin' aparece en la actividad, son los porcentajes correctos. "
+                        "NUNCA uses 'zonas_fc_estimadas' ni calcules porcentajes por tu cuenta.\n\n"
                         "FORMATO: Cada item de lista en su propia linea con '- ' o '* '. "
                         "NUNCA pongas varios items en la misma linea. "
-                        "PROHIBIDO: velocidad en m/s, duracion en segundos, floats crudos (ej: 313.53961181640625). "
-                        "USA los valores ya calculados del bloque: "
-                        "ciclismo → velocidad en km/h (campo velocidad_media_kmh / velocidad_maxima_kmh); "
-                        "running → ritmo en min/km (campo ritmo_medio_min_km); "
-                        "duracion en HH:MM:SS, distancia en km."
+                        "PROHIBIDO: velocidad en m/s, duracion en segundos, floats crudos. "
+                        "USA los valores calculados: "
+                        "ciclismo \u2192 km/h; running \u2192 min/km; duracion \u2192 HH:MM:SS."
                     ),
                 })
             else:
