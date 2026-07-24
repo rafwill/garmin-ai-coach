@@ -418,6 +418,22 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
                 for _spd_k in ("avgSpeed", "averageSpeed", "maxSpeed", "minSpeed",
                                "avg_speed", "average_speed", "max_speed", "avg_speed_ms", "max_speed_ms"):
                     data.pop(_spd_k, None)
+                # Potencia: para actividades de carrera (sin potenciómetro físico tipo Stryd)
+                # la potencia es una estimación interna de Garmin — se etiqueta como tal.
+                # Para ciclismo la potencia proviene de un potenciómetro real → se deja sin etiquetar.
+                if not _is_cycling_activity(act_type_raw):
+                    for _pow_src, _pow_dst in (
+                        ("avgPower",   "potencia_media_estimada_w"),
+                        ("maxPower",   "potencia_maxima_estimada_w"),
+                        ("avg_power",  "potencia_media_estimada_w"),
+                        ("max_power",  "potencia_maxima_estimada_w"),
+                    ):
+                        _pv = data.pop(_pow_src, None)
+                        if _pv is not None and _pow_dst not in data:
+                            try:
+                                data[_pow_dst] = round(float(_pv), 1)
+                            except (ValueError, TypeError):
+                                pass
             except (ValueError, TypeError):
                 pass
             # Calcular zonas de FC estimadas (necesita FCmax y FCmedia)
