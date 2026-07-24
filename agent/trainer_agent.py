@@ -4929,12 +4929,22 @@ class TrainerAgent:
                 )
 
                 # Eliminar del array de mensajes cualquier respuesta previa del asistente
-                # que sea un análisis de actividad — evita copiar floats crudos y formato viejo
+                # que sea un análisis de actividad — evita copiar floats crudos y formato viejo.
+                # Incluye tanto los headers del bloque pre-computado como el texto libre
+                # que el LLM genera, para limpiar también respuestas de sesiones anteriores.
                 _ANALYSIS_MARKERS = (
+                    # Headers del bloque pre-computado
                     "Resumen ejecutivo", "zonas de FC", "Distribución por zonas",
                     "Plan de recuperación", "Efecto de entrenamiento",
                     "Recomendaciones para la próxima", "Training load:",
                     "Body battery:", "Hidratación recomendada",
+                    # Texto libre típico del LLM en español (respuestas de sesiones anteriores)
+                    "velocidad media fue", "velocidad máxima fue",
+                    "ritmo medio fue", "frecuencia cardíaca media fue",
+                    "efecto de entrenamiento de", "zonas de frecuencia cardíaca",
+                    "carga de entrenamiento (TSS)", "elevación ganada fue",
+                    "tiempo de recuperación de",
+                    # Identificadores de la actividad concreta
                     user_date, str(pre_id),
                 )
                 messages = [
