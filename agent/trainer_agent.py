@@ -2916,9 +2916,18 @@ def _extract_iso_date_from_text(value: str) -> str | None:
     if not text:
         return None
 
+    # Coincidencia exacta (el texto completo es la palabra clave)
     if text in _TODAY_KEYWORDS:
         return date.today().isoformat()
     if text in _YESTERDAY_KEYWORDS:
+        return (date.today() - timedelta(days=1)).isoformat()
+
+    # Palabra clave como token dentro de un mensaje más largo
+    # ej: "Analiza mi actividad de ayer" → "ayer" está en el texto
+    _words = set(re.split(r"\W+", text))
+    if _words & _TODAY_KEYWORDS:
+        return date.today().isoformat()
+    if _words & _YESTERDAY_KEYWORDS:
         return (date.today() - timedelta(days=1)).isoformat()
 
     # yyyy-mm-dd
