@@ -5057,6 +5057,8 @@ class TrainerAgent:
                     if _zones_in_act:
                         raw_hr_zones = json.dumps(_zones_in_act)
                         log.info("hr_zones: encontradas %d zonas en get_activity", len(_zones_in_act))
+                    else:
+                        log.info("hr_zones: get_activity no contiene datos de zonas (requiere llamada específica)")
                 except Exception:
                     pass
 
@@ -5066,7 +5068,10 @@ class TrainerAgent:
                         try:
                             _raw = await call_tool(self.mcp_session, "get_activity_hr_zones", _param)
                             log.info("get_activity_hr_zones(%s): %s", _param, (_raw or "")[:200])
-                            if _raw and _raw.strip() not in ("null", "[]", "{}", "(sin datos)", ""):
+                            if not _raw or "Unknown tool" in _raw or "unknown tool" in _raw.lower():
+                                log.info("hr_zones: get_activity_hr_zones no disponible en este servidor MCP")
+                                break  # no reintentar con otros params si la herramienta no existe
+                            if _raw.strip() not in ("null", "[]", "{}", "(sin datos)", ""):
                                 _parsed = _parse_hr_zones_list(_raw)
                                 if _parsed:
                                     raw_hr_zones = _raw
@@ -5074,21 +5079,25 @@ class TrainerAgent:
                                     break
                         except Exception as _e:
                             log.info("get_activity_hr_zones(%s) error: %s", list(_param.keys())[0], _e)
+                            break
 
-                # Estrategia 3: get_activity_hr_in_timezones (nombre alternativo en algunos servidores)
+                # Estrategia 3: get_activity_hr_in_timezones (nombre real en garminconnect / garmin-mcp)
                 if not raw_hr_zones:
                     for _param in ({"activity_id": pre_id}, {"activityId": pre_id}):
                         try:
                             _raw = await call_tool(self.mcp_session, "get_activity_hr_in_timezones", _param)
                             log.info("get_activity_hr_in_timezones(%s): %s", _param, (_raw or "")[:200])
-                            if _raw and _raw.strip() not in ("null", "[]", "{}", "(sin datos)", ""):
+                            if not _raw or "Unknown tool" in _raw or "unknown tool" in _raw.lower():
+                                log.info("hr_zones: get_activity_hr_in_timezones no disponible en este servidor MCP")
+                                break  # no reintentar con otros params si la herramienta no existe
+                            if _raw.strip() not in ("null", "[]", "{}", "(sin datos)", ""):
                                 _parsed = _parse_hr_zones_list(_raw)
                                 if _parsed:
                                     raw_hr_zones = _raw
                                     log.info("hr_zones: %d zonas via get_activity_hr_in_timezones", len(_parsed))
                                     break
                         except Exception:
-                            pass
+                            break
 
                 if raw_hr_zones:
                     context_parts.append(f"ZONAS FC (datos reales):\n{raw_hr_zones}")
