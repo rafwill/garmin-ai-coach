@@ -3256,7 +3256,9 @@ def _parse_hr_zones_list(raw: str | None) -> list[dict] | None:
 
         # Límites de FC de la zona — zoneLow/zoneHigh o minHeartRateIn/maxHeartRateIn
         lo = (z.get("minHeartRateIn") or z.get("min_heart_rate_in")
-              or z.get("zoneLow") or z.get("zone_low") or z.get("minHr") or "?")
+              or z.get("zoneLow") or z.get("zone_low")
+              or z.get("zoneLowBoundary") or z.get("zone_low_boundary")
+              or z.get("minHr") or "?")
         hi = (z.get("maxHeartRateIn") or z.get("max_heart_rate_in")
               or z.get("zoneHigh") or z.get("zone_high") or z.get("maxHr") or "?")
 
@@ -3378,10 +3380,11 @@ def _build_activity_analysis_block(
         _total_secs = sum(float(z.get("secsInZone") or 0) for z in _zones_parsed)
         # Si no hay segundos pero hay porcentajes directos, usarlos
         _has_pct_direct = all(z.get("pctDirect") is not None for z in _zones_parsed)
-        if (_total_secs > 0 or _has_pct_direct) and avg_hr_f and max_hr_f:
+        if _total_secs > 0 or _has_pct_direct:
             lines.append("")
             lines.append("=== ZONAS DE FRECUENCIA CARDIACA (datos reales Garmin — Tiempo en Zonas) ===")
-            lines.append(f"FCmax: {max_hr_f:.0f} bpm | FC media: {avg_hr_f:.0f} bpm")
+            if avg_hr_f and max_hr_f:
+                lines.append(f"FCmax: {max_hr_f:.0f} bpm | FC media: {avg_hr_f:.0f} bpm")
             for z in sorted(_zones_parsed, key=lambda x: int(x.get("zoneNumber") or 0)):
                 _z_secs = float(z.get("secsInZone") or 0)
                 _z_pct_d = z.get("pctDirect")
@@ -5169,11 +5172,37 @@ class TrainerAgent:
                     )
                 ]
 
+                # Pre-computar texto de zonas para forzar salida exacta al LLM
+                _zones_direct_text = None
+                if _zones_for_predata:
+                    _total_zd = sum(float(z.get("secsInZone") or 0) for z in _zones_for_predata)
+                    if _total_zd > 0:
+                        _zdlines = []
+                        for _z in sorted(_zones_for_predata, key=lambda x: int(x.get("zoneNumber") or 0)):
+                            _zn = int(_z.get("zoneNumber") or 0)
+                            _zs = float(_z.get("secsInZone") or 0)
+                            _pct = round(_zs / _total_zd * 100, 1)
+                            _mins = int(_zs / 60)
+                            _zname = _z.get("zoneName") or f"Z{_zn}"
+                            _lo_d = _z.get("minHeartRateIn") or "?"
+                            _hi_d = _z.get("maxHeartRateIn") or "?"
+                            _rng = f" ({_lo_d}-{_hi_d} bpm)" if _lo_d != "?" and _hi_d != "?" else ""
+                            _zdlines.append(f"• Z{_zn} {_zname}{_rng}: {_pct}% (~{_mins} min)")
+                        _zones_direct_text = "\n".join(_zdlines)
+
+                _zones_override = (
+                    f"\nZONAS FC REALES GARMIN — USA ESTOS VALORES EXACTOS:\n{_zones_direct_text}\n"
+                    "OBLIGA: copia estas lineas en '## 💓 Distribucion por zonas de FC'. "
+                    "PROHIBIDO calcular, estimar o usar zonas_fc_estimadas.\n"
+                    if _zones_direct_text else ""
+                )
+
                 messages.insert(len(messages) - 1, {
                     "role": "system",
                     "content": (
                         f"ANALISIS PRE-COMPUTADO DE LA ACTIVIDAD DEL {user_date}:\n\n"
                         f"{analysis_block}\n\n"
+                        f"{_zones_override}"
                         "INSTRUCCION OBLIGATORIA: Usa SOLO los datos de los bloques === de arriba.\n"
                         "Estructura la respuesta en Markdown con estas secciones (una por linea):\n\n"
                         "## \U0001f4ca Resumen ejecutivo\n"
@@ -5183,10 +5212,6 @@ class TrainerAgent:
                         "## \U0001f6cc Estado pre-carrera (body battery y sueno si disponibles)\n"
                         "## \U0001f504 Plan de recuperacion post-actividad\n"
                         "## \U0001f3af Recomendaciones para la proxima edicion\n\n"
-                        "ZONAS DE FC \u2014 REGLA CRITICA: "
-                        "Si el bloque === ZONAS... (datos reales Garmin) === existe, usa ESOS datos. "
-                        "Si 'zonas_fc_reales_garmin' aparece en la actividad, son los porcentajes correctos. "
-                        "NUNCA uses 'zonas_fc_estimadas' ni calcules porcentajes por tu cuenta.\n\n"
                         "FORMATO: Cada item de lista en su propia linea con '- ' o '* '. "
                         "NUNCA pongas varios items en la misma linea. "
                         "PROHIBIDO: velocidad en m/s, duracion en segundos, floats crudos. "
