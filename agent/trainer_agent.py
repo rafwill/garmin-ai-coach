@@ -4858,9 +4858,29 @@ class TrainerAgent:
         # resolver y cargar la actividad + contexto completo ANTES del bucle LLM.
         user_date = _extract_iso_date_from_text(user_message)
         if user_date:
-            pre_id = await _find_activity_id_by_date(self.mcp_session, user_date)
+            # Intento 1: get_activities_by_date para la fecha exacta (más fiable)
+            pre_id = None
+            try:
+                _raw_date_acts = await call_tool(
+                    self.mcp_session, "get_activities_by_date",
+                    {"startdate": user_date, "enddate": user_date},
+                )
+                _acts_day = _extract_activities_list(_raw_date_acts)
+                if _acts_day:
+                    _first = _acts_day[0]
+                    pre_id = (_first.get("id") or _first.get("activityId")
+                              or _first.get("activity_id"))
+                    if pre_id:
+                        pre_id = int(pre_id)
+            except Exception as _e:
+                log.debug("pre_fetch get_activities_by_date fallback: %s", _e)
+
+            # Intento 2: paginación por fecha si el anterior falló
+            if pre_id is None:
+                pre_id = await _find_activity_id_by_date(self.mcp_session, user_date)
+
+            log.info("pre_fetch: user_date=%s pre_id=%s", user_date, pre_id)
             if pre_id is not None:
-                log.debug(f"Pre-fetch actividad {user_date} -> id={pre_id}")
                 raw_pre = await call_tool(self.mcp_session, "get_activity", {"activity_id": pre_id})
                 pre_data = _compact_tool_result(raw_pre, "get_activity")
                 context_parts = [f"ACTIVIDAD (activityId={pre_id}, fecha={user_date}):\n{pre_data}"]
