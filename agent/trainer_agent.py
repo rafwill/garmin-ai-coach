@@ -3389,7 +3389,7 @@ def _build_activity_analysis_block(
                 _z_secs = float(z.get("secsInZone") or 0)
                 _z_pct_d = z.get("pctDirect")
                 if _total_secs > 0:
-                    _z_pct = _z_secs / _total_secs * 100
+                    _z_pct = _z_secs / (dur_s or _total_secs) * 100
                 elif _z_pct_d is not None:
                     _z_pct = float(_z_pct_d)
                     _z_secs = (_z_pct / 100.0 * (dur_s or 0))
@@ -5000,6 +5000,16 @@ class TrainerAgent:
             if pre_id is not None:
                 raw_pre = await call_tool(self.mcp_session, "get_activity", {"activity_id": pre_id})
                 pre_data = _compact_tool_result(raw_pre, "get_activity")
+                # Duración total de la actividad — denominador correcto para % zonas (igual que Garmin Connect)
+                _act_dur_s = None
+                try:
+                    _act_raw_j = json.loads(raw_pre) if raw_pre else {}
+                    _dur_raw = (_act_raw_j.get("duration") or _act_raw_j.get("movingDuration")
+                                or _act_raw_j.get("duration_seconds"))
+                    if _dur_raw is not None:
+                        _act_dur_s = float(_dur_raw)
+                except Exception:
+                    pass
                 context_parts = [f"ACTIVIDAD (activityId={pre_id}, fecha={user_date}):\n{pre_data}"]
 
                 # Body battery del día de la actividad (requiere start_date + end_date)
@@ -5116,12 +5126,14 @@ class TrainerAgent:
                             _pd.pop("zonas_fc_estimadas", None)
                             _pd.pop("nota_zonas", None)
                             _total_z = sum(float(z.get("secsInZone") or 0) for z in _zones_for_predata)
+                            # Garmin Connect divide por duración total, no por suma de zonas
+                            _z_denom = _act_dur_s if _act_dur_s and _act_dur_s > 0 else _total_z
                             if _total_z > 0:
                                 _zr = {}
                                 for _z in sorted(_zones_for_predata, key=lambda x: int(x.get("zoneNumber") or 0)):
                                     _zn = int(_z.get("zoneNumber") or 0)
                                     _zs = float(_z.get("secsInZone") or 0)
-                                    _pct = round(_zs / _total_z * 100, 1)
+                                    _pct = round(_zs / _z_denom * 100, 1)
                                     _lo = _z.get("minHeartRateIn") or "?"
                                     _hi = _z.get("maxHeartRateIn") or "?"
                                     _zname = _z.get("zoneName") or f"Z{_zn}"
@@ -5176,12 +5188,14 @@ class TrainerAgent:
                 _zones_direct_text = None
                 if _zones_for_predata:
                     _total_zd = sum(float(z.get("secsInZone") or 0) for z in _zones_for_predata)
+                    # Garmin Connect divide por duración total de la actividad, no por suma de zonas
+                    _zd_denom = _act_dur_s if _act_dur_s and _act_dur_s > 0 else _total_zd
                     if _total_zd > 0:
                         _zdlines = []
                         for _z in sorted(_zones_for_predata, key=lambda x: int(x.get("zoneNumber") or 0)):
                             _zn = int(_z.get("zoneNumber") or 0)
                             _zs = float(_z.get("secsInZone") or 0)
-                            _pct = round(_zs / _total_zd * 100, 1)
+                            _pct = round(_zs / _zd_denom * 100, 1)
                             _mins = int(_zs / 60)
                             _zname = _z.get("zoneName") or f"Z{_zn}"
                             _lo_d = _z.get("minHeartRateIn") or "?"
