@@ -436,9 +436,34 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
                                 pass
             except (ValueError, TypeError):
                 pass
-            # Calcular zonas de FC estimadas (necesita FCmax y FCmedia)
+            # Zonas de FC: prioridad 1 = datos reales del dispositivo; prioridad 2 = estimación gaussiana
             try:
-                if avg_hr and max_hr:
+                # Intento 1: datos reales (heartRateZones incluido en get_activity)
+                _raw_hr_zones = (
+                    data.get("heartRateZones")
+                    or data.get("hr_zones")
+                    or data.get("hrZones")
+                    or data.get("timeInHeartRateZones")
+                )
+                if isinstance(_raw_hr_zones, list) and len(_raw_hr_zones) >= 4:
+                    _total_z_secs = sum(
+                        float(z.get("secsInZone") or z.get("secs_in_zone") or 0)
+                        for z in _raw_hr_zones
+                    )
+                    if _total_z_secs > 0:
+                        zonas_reales = {}
+                        for z in sorted(_raw_hr_zones, key=lambda x: int(x.get("zoneNumber") or x.get("zone") or 0)):
+                            _zn  = int(z.get("zoneNumber") or z.get("zone") or 0)
+                            _zs  = float(z.get("secsInZone") or z.get("secs_in_zone") or 0)
+                            _pct = round(_zs / _total_z_secs * 100, 1)
+                            _lo  = z.get("minHeartRateIn") or z.get("min_hr") or "?"
+                            _hi  = z.get("maxHeartRateIn") or z.get("max_hr") or "?"
+                            _mins = round(_zs / 60, 0)
+                            zonas_reales[f"Z{_zn}_{_lo}-{_hi}bpm"] = f"{_pct}% (~{int(_mins)} min)"
+                        data["zonas_fc_reales"] = zonas_reales
+                        data["nota_zonas"] = "Zonas reales desde el dispositivo Garmin (configuración del usuario)."
+                elif avg_hr and max_hr:
+                    # Intento 2: estimación gaussiana como fallback
                     fcmax = float(max_hr)
                     fcmed = float(avg_hr)
                     z_bounds = [
@@ -448,8 +473,6 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
                         ("Z4_umbral_anaerobico", 0.80, 0.90),
                         ("Z5_vo2max", 0.90, 1.10),
                     ]
-                    # Estimacion naive: distribucion gaussiana centrada en FC_media
-                    # con sigma ~10% FCmax. Normalizada a 100%.
                     sigma = 0.10 * fcmax
                     def normal_cdf(x, mu, s):
                         return 0.5 * (1 + math.erf((x - mu) / (s * math.sqrt(2))))
@@ -461,7 +484,6 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
                         p = normal_cdf(hi_bpm, fcmed, sigma) - normal_cdf(lo_bpm, fcmed, sigma)
                         zone_pct[name] = round(max(p, 0) * 100, 1)
                         total += zone_pct[name]
-                    # Normalizar a 100%
                     if total > 0:
                         zone_pct = {k: round(v / total * 100, 1) for k, v in zone_pct.items()}
                     if dur_s:
@@ -470,8 +492,8 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
                             zone_pct[name] = f"{pct}% (~{int(mins)} min)"
                     data["zonas_fc_estimadas"] = zone_pct
                     data["nota_zonas"] = (
-                        f"Estimacion basada en FC_media={int(fcmed)}bpm y FC_max={int(fcmax)}bpm. "
-                        "Para zonas exactas consultar datos de hrTimeInZones si disponibles."
+                        f"ESTIMACIÓN gaussiana (FC_media={int(fcmed)}bpm, FC_max={int(fcmax)}bpm). "
+                        "Puede diferir de las zonas reales configuradas en Garmin."
                     )
             except Exception:
                 pass
@@ -3132,6 +3154,7 @@ def _build_activity_analysis_block(
     hrv_raw: str | None = None,
     training_load_raw: str | None = None,
     ftp: float | None = None,
+    hr_zones_raw: str | None = None,
 ) -> str:
     """Construye un bloque de análisis pre-computado en Python para inyectar al LLM.
 
@@ -3216,10 +3239,42 @@ def _build_activity_analysis_block(
     if _tss_val > 0:
         lines.append(f"{_tss_lbl}: {_tss_val:.1f}")
 
-    # ── Sección 2: Zonas de FC estimadas ──────────────────────────────────
-    if avg_hr_f and max_hr_f and dur_s:
+    # ── Sección 2: Zonas de FC ─────────────────────────────────────────────
+    # Prioridad 1: datos reales del dispositivo (get_activity_hr_zones)
+    # Prioridad 2: estimación gaussiana (menos precisa, solo como fallback)
+    _zones_shown = False
+    if hr_zones_raw:
+        try:
+            _zones_data = json.loads(hr_zones_raw) if hr_zones_raw.strip() else []
+            if isinstance(_zones_data, list) and len(_zones_data) >= 4:
+                _total_secs = sum(
+                    float(z.get("secsInZone") or z.get("secs_in_zone") or z.get("seconds") or 0)
+                    for z in _zones_data
+                )
+                if _total_secs > 0 and avg_hr_f and max_hr_f and dur_s:
+                    lines.append("")
+                    lines.append("=== ZONAS DE FRECUENCIA CARDIACA (datos reales del dispositivo Garmin) ===")
+                    lines.append(f"FCmax: {max_hr_f:.0f} bpm | FC media: {avg_hr_f:.0f} bpm")
+                    for z in sorted(
+                        _zones_data,
+                        key=lambda x: int(x.get("zoneNumber") or x.get("zone_number") or x.get("zone") or 0)
+                    ):
+                        _z_secs = float(z.get("secsInZone") or z.get("secs_in_zone") or z.get("seconds") or 0)
+                        _z_pct  = _z_secs / _total_secs * 100
+                        _z_mins = _z_secs / 60
+                        _z_num  = int(z.get("zoneNumber") or z.get("zone_number") or z.get("zone") or 0)
+                        _z_lo   = z.get("minHeartRateIn") or z.get("min_heart_rate_in") or z.get("min_hr") or "?"
+                        _z_hi   = z.get("maxHeartRateIn") or z.get("max_heart_rate_in") or z.get("max_hr") or "?"
+                        _z_name = z.get("zoneName") or z.get("zone_name") or f"Z{_z_num}"
+                        lines.append(f"  {_z_name} (Z{_z_num}, {_z_lo}–{_z_hi} bpm): {_z_pct:.1f}%  (~{_z_mins:.0f} min)")
+                    _zones_shown = True
+        except Exception:
+            pass
+
+    if not _zones_shown and avg_hr_f and max_hr_f and dur_s:
         lines.append("")
-        lines.append("=== ZONAS DE FRECUENCIA CARDIACA (estimacion por distribucion gaussiana) ===")
+        lines.append("=== ZONAS DE FRECUENCIA CARDIACA (estimacion gaussiana — aproximada) ===")
+        lines.append(f"AVISO: sin datos reales de zonas. Estimación basada en FC media y FCmax, puede diferir de las zonas reales configuradas en Garmin.")
         lines.append(f"FCmax observada: {max_hr_f:.0f} bpm | FC media: {avg_hr_f:.0f} bpm")
         sigma = 0.10 * max_hr_f
         zone_defs = [
@@ -4842,6 +4897,18 @@ class TrainerAgent:
                 except Exception as e:
                     log.debug(f"training_load error: {e}")
 
+                # Zonas reales de FC de la actividad
+                try:
+                    raw_hr_zones = await call_tool(
+                        self.mcp_session, "get_activity_hr_zones", {"activity_id": pre_id}
+                    )
+                    if raw_hr_zones and raw_hr_zones.strip() and raw_hr_zones.strip() != "(sin datos)":
+                        context_parts.append(f"ZONAS FC (datos reales):\n{raw_hr_zones}")
+                    log.debug(f"hr_zones({pre_id}): {(raw_hr_zones or '')[:80]}")
+                except Exception as e:
+                    raw_hr_zones = None
+                    log.debug(f"hr_zones error: {e}")
+
                 # Construir bloque de análisis pre-computado en Python
                 analysis_block = _build_activity_analysis_block(
                     activity_raw=raw_pre,
@@ -4850,6 +4917,7 @@ class TrainerAgent:
                     hrv_raw=next((p for p in context_parts if "HRV" in p), None),
                     training_load_raw=next((p for p in context_parts if "CARGA" in p), None),
                     ftp=float((self.user_profile.get("performance") or {}).get("cycling_ftp") or 0) or None,
+                    hr_zones_raw=raw_hr_zones,
                 )
 
                 # Eliminar del array de mensajes cualquier respuesta previa del asistente
