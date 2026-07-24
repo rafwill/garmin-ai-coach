@@ -447,25 +447,25 @@ def _compact_tool_result(raw: str | None, tool_name: str = "") -> str:
             # Zonas de FC: prioridad 1 = datos reales del dispositivo; prioridad 2 = estimación gaussiana
             try:
                 # Intento 1: datos reales (heartRateZones incluido en get_activity)
-                _raw_hr_zones = (
+                _raw_hr_zones_str = json.dumps(
                     data.get("heartRateZones")
                     or data.get("hr_zones")
                     or data.get("hrZones")
                     or data.get("timeInHeartRateZones")
-                )
-                if isinstance(_raw_hr_zones, list) and len(_raw_hr_zones) >= 4:
-                    _total_z_secs = sum(
-                        float(z.get("secsInZone") or z.get("secs_in_zone") or 0)
-                        for z in _raw_hr_zones
-                    )
+                    or data.get("heartRateTimeInZones")
+                ) if any(data.get(k) for k in ("heartRateZones","hr_zones","hrZones",
+                         "timeInHeartRateZones","heartRateTimeInZones")) else None
+                _zones_parsed_compact = _parse_hr_zones_list(_raw_hr_zones_str) if _raw_hr_zones_str else None
+                if _zones_parsed_compact:
+                    _total_z_secs = sum(float(z.get("secsInZone") or 0) for z in _zones_parsed_compact)
                     if _total_z_secs > 0:
                         zonas_reales = {}
-                        for z in sorted(_raw_hr_zones, key=lambda x: int(x.get("zoneNumber") or x.get("zone") or 0)):
-                            _zn  = int(z.get("zoneNumber") or z.get("zone") or 0)
-                            _zs  = float(z.get("secsInZone") or z.get("secs_in_zone") or 0)
+                        for z in sorted(_zones_parsed_compact, key=lambda x: int(x.get("zoneNumber") or 0)):
+                            _zn  = int(z.get("zoneNumber") or 0)
+                            _zs  = float(z.get("secsInZone") or 0)
                             _pct = round(_zs / _total_z_secs * 100, 1)
-                            _lo  = z.get("minHeartRateIn") or z.get("min_hr") or "?"
-                            _hi  = z.get("maxHeartRateIn") or z.get("max_hr") or "?"
+                            _lo  = z.get("minHeartRateIn") or "?"
+                            _hi  = z.get("maxHeartRateIn") or "?"
                             _mins = round(_zs / 60, 0)
                             zonas_reales[f"Z{_zn}_{_lo}-{_hi}bpm"] = f"{_pct}% (~{int(_mins)} min)"
                         data["zonas_fc_reales"] = zonas_reales
@@ -3164,6 +3164,100 @@ async def _find_activity_id_by_name(mcp_session: ClientSession, name_hint: str) 
     return None
 
 
+def _parse_hr_zones_list(raw: str | None) -> list[dict] | None:
+    """Parsea la respuesta de get_activity_hr_zones en una lista normalizada de zonas.
+
+    Maneja todos los formatos conocidos de la API de Garmin/garmin-mcp:
+    - Array directo: [{zoneNumber, secsInZone, minHeartRateIn, ...}]
+    - Objeto envuelto: {heartRateZones: [...]} / {hrTimeInZones: [...]} / etc.
+    - Variantes de campo: zoneLow/zoneHigh en lugar de minHeartRateIn/maxHeartRateIn
+    - Variantes de tiempo: secsInZone / timeInZone / time_in_zone (segundos)
+    - percentInZone como alternativa a secsInZone cuando no hay duración total
+
+    Devuelve lista de dicts normalizados o None si no hay datos utilizables.
+    """
+    if not raw or not raw.strip():
+        return None
+    stripped = raw.strip()
+    # Filtrar respuestas vacías o de error
+    if stripped in ("null", "[]", "{}", "(sin datos)"):
+        return None
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+
+    # Extraer lista de zonas desde múltiples estructuras posibles
+    zones_raw: list = []
+    if isinstance(data, list):
+        zones_raw = data
+    elif isinstance(data, dict):
+        for key in (
+            "heartRateZones", "hrTimeInZones", "timeInHeartRateZones",
+            "heartRateTimeInZones", "zones", "hr_zones", "hrZones",
+        ):
+            val = data.get(key)
+            if isinstance(val, list) and val:
+                zones_raw = val
+                break
+        # Si no hay lista anidada pero el propio dict tiene zoneNumber, es un único objeto
+        if not zones_raw and data.get("zoneNumber") is not None:
+            zones_raw = [data]
+
+    if not zones_raw:
+        return None
+
+    # Normalizar cada zona a un dict homogéneo
+    normalized: list[dict] = []
+    for z in zones_raw:
+        if not isinstance(z, dict):
+            continue
+
+        zone_num = (z.get("zoneNumber") or z.get("zone_number")
+                    or z.get("zone") or z.get("zoneNum") or 0)
+        try:
+            zone_num = int(zone_num)
+        except (TypeError, ValueError):
+            zone_num = 0
+
+        # Tiempo en zona (segundos) — varios nombres posibles
+        secs = (z.get("secsInZone") or z.get("secs_in_zone")
+                or z.get("timeInZone") or z.get("time_in_zone")
+                or z.get("seconds") or z.get("durationSeconds") or 0)
+        try:
+            secs = float(secs)
+        except (TypeError, ValueError):
+            secs = 0.0
+
+        # Porcentaje directo (cuando no hay segundos disponibles)
+        pct_direct = z.get("percentInZone") or z.get("percent_in_zone") or z.get("percentage")
+        try:
+            pct_direct = float(pct_direct) if pct_direct is not None else None
+        except (TypeError, ValueError):
+            pct_direct = None
+
+        # Límites de FC de la zona — zoneLow/zoneHigh o minHeartRateIn/maxHeartRateIn
+        lo = (z.get("minHeartRateIn") or z.get("min_heart_rate_in")
+              or z.get("zoneLow") or z.get("zone_low") or z.get("minHr") or "?")
+        hi = (z.get("maxHeartRateIn") or z.get("max_heart_rate_in")
+              or z.get("zoneHigh") or z.get("zone_high") or z.get("maxHr") or "?")
+
+        zone_name = (z.get("zoneName") or z.get("zone_name")
+                     or z.get("name") or f"Z{zone_num}")
+
+        if secs > 0 or pct_direct is not None:
+            normalized.append({
+                "zoneNumber": zone_num,
+                "secsInZone": secs,
+                "pctDirect": pct_direct,  # porcentaje directo si está disponible
+                "minHeartRateIn": lo,
+                "maxHeartRateIn": hi,
+                "zoneName": zone_name,
+            })
+
+    return normalized if normalized else None
+
+
 def _build_activity_analysis_block(
     activity_raw: str,
     body_battery_raw: str | None = None,
@@ -3258,35 +3352,37 @@ def _build_activity_analysis_block(
 
     # ── Sección 2: Zonas de FC ─────────────────────────────────────────────
     # Prioridad 1: datos reales del dispositivo (get_activity_hr_zones)
-    # Prioridad 2: estimación gaussiana (menos precisa, solo como fallback)
+    # Prioridad 2: estimación gaussiana (fallback, solo cuando no hay datos reales)
     _zones_shown = False
-    if hr_zones_raw:
-        try:
-            _zones_data = json.loads(hr_zones_raw) if hr_zones_raw.strip() else []
-            if isinstance(_zones_data, list) and len(_zones_data) >= 4:
-                _total_secs = sum(
-                    float(z.get("secsInZone") or z.get("secs_in_zone") or z.get("seconds") or 0)
-                    for z in _zones_data
-                )
-                if _total_secs > 0 and avg_hr_f and max_hr_f and dur_s:
-                    lines.append("")
-                    lines.append("=== ZONAS DE FRECUENCIA CARDIACA (datos reales del dispositivo Garmin) ===")
-                    lines.append(f"FCmax: {max_hr_f:.0f} bpm | FC media: {avg_hr_f:.0f} bpm")
-                    for z in sorted(
-                        _zones_data,
-                        key=lambda x: int(x.get("zoneNumber") or x.get("zone_number") or x.get("zone") or 0)
-                    ):
-                        _z_secs = float(z.get("secsInZone") or z.get("secs_in_zone") or z.get("seconds") or 0)
-                        _z_pct  = _z_secs / _total_secs * 100
-                        _z_mins = _z_secs / 60
-                        _z_num  = int(z.get("zoneNumber") or z.get("zone_number") or z.get("zone") or 0)
-                        _z_lo   = z.get("minHeartRateIn") or z.get("min_heart_rate_in") or z.get("min_hr") or "?"
-                        _z_hi   = z.get("maxHeartRateIn") or z.get("max_heart_rate_in") or z.get("max_hr") or "?"
-                        _z_name = z.get("zoneName") or z.get("zone_name") or f"Z{_z_num}"
-                        lines.append(f"  {_z_name} (Z{_z_num}, {_z_lo}–{_z_hi} bpm): {_z_pct:.1f}%  (~{_z_mins:.0f} min)")
-                    _zones_shown = True
-        except Exception:
-            pass
+    _zones_parsed = _parse_hr_zones_list(hr_zones_raw)
+    if _zones_parsed:
+        # Calcular total de segundos para los porcentajes
+        _total_secs = sum(float(z.get("secsInZone") or 0) for z in _zones_parsed)
+        # Si no hay segundos pero hay porcentajes directos, usarlos
+        _has_pct_direct = all(z.get("pctDirect") is not None for z in _zones_parsed)
+        if (_total_secs > 0 or _has_pct_direct) and avg_hr_f and max_hr_f:
+            lines.append("")
+            lines.append("=== ZONAS DE FRECUENCIA CARDIACA (datos reales Garmin — Tiempo en Zonas) ===")
+            lines.append(f"FCmax: {max_hr_f:.0f} bpm | FC media: {avg_hr_f:.0f} bpm")
+            for z in sorted(_zones_parsed, key=lambda x: int(x.get("zoneNumber") or 0)):
+                _z_secs = float(z.get("secsInZone") or 0)
+                _z_pct_d = z.get("pctDirect")
+                if _total_secs > 0:
+                    _z_pct = _z_secs / _total_secs * 100
+                elif _z_pct_d is not None:
+                    _z_pct = float(_z_pct_d)
+                    _z_secs = (_z_pct / 100.0 * (dur_s or 0))
+                else:
+                    continue
+                _z_mins = _z_secs / 60
+                _z_num = int(z.get("zoneNumber") or 0)
+                _z_lo = z.get("minHeartRateIn") or "?"
+                _z_hi = z.get("maxHeartRateIn") or "?"
+                _z_name = z.get("zoneName") or f"Z{_z_num}"
+                _hr_range = f"{_z_lo}–{_z_hi} bpm" if _z_lo != "?" and _z_hi != "?" else ""
+                _suffix = f" ({_hr_range})" if _hr_range else ""
+                lines.append(f"  {_z_name} (Z{_z_num}){_suffix}: {_z_pct:.1f}%  (~{_z_mins:.0f} min)")
+            _zones_shown = True
 
     if not _zones_shown and avg_hr_f and max_hr_f and dur_s:
         lines.append("")
@@ -4939,12 +5035,17 @@ class TrainerAgent:
                     raw_hr_zones = await call_tool(
                         self.mcp_session, "get_activity_hr_zones", {"activity_id": pre_id}
                     )
-                    if raw_hr_zones and raw_hr_zones.strip() and raw_hr_zones.strip() != "(sin datos)":
+                    # Si falla, intentar con el nombre camelCase del parámetro
+                    if not raw_hr_zones or raw_hr_zones.strip() in ("null", "[]", "{}", "(sin datos)"):
+                        raw_hr_zones = await call_tool(
+                            self.mcp_session, "get_activity_hr_zones", {"activityId": pre_id}
+                        )
+                    log.info("hr_zones(%s): %s", pre_id, (raw_hr_zones or "")[:300])
+                    if raw_hr_zones and raw_hr_zones.strip() and raw_hr_zones.strip() not in ("null","[]","{}","(sin datos)"):
                         context_parts.append(f"ZONAS FC (datos reales):\n{raw_hr_zones}")
-                    log.debug(f"hr_zones({pre_id}): {(raw_hr_zones or '')[:80]}")
                 except Exception as e:
                     raw_hr_zones = None
-                    log.debug(f"hr_zones error: {e}")
+                    log.info("hr_zones error: %s", e)
 
                 # Construir bloque de análisis pre-computado en Python
                 analysis_block = _build_activity_analysis_block(
